@@ -1,0 +1,58 @@
+/* --- Custom TitleBar --- */
+.titlebar {
+  display: flex;
+  height: 40px;
+  background: var(--color-bg-secondary);
+  border-bottom: 1px solid var(--color-surface-border);
+  flex-shrink: 0;
+  -webkit-app-region: drag;
+  user-select: none;
+  z-index: 1000;
+}
+
+.titlebar__drag-region {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  padding: 0 var(--space-4);
+  gap: var(--space-2);
+  color: var(--color-text-secondary);
+}
+
+.titlebar__icon {
+  color: var(--color-accent);
+}
+
+.titlebar__title {
+  font-size: 12px;
+  font-weight: var(--weight-medium);
+  letter-spacing: 0.02em;
+}
+
+.titlebar__controls {
+  display: flex;
+  -webkit-app-region: no-drag;
+}
+
+.titlebar__btn {
+  width: 46px;
+  height: 100%;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: transparent;
+  border: none;
+  color: var(--color-text-secondary);
+  cursor: default;
+  transition: background-color 0.1s ease;
+}
+
+.titlebar__btn:hover {
+  background: var(--color-bg-hover);
+  color: var(--color-text-primary);
+}
+
+.titlebar__btn--close:hover {
+  background: #E81123;
+  color: white;
+}
