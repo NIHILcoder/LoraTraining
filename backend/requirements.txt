@@ -12,6 +12,4 @@ diffusers>=0.30.0
 peft>=0.12.0
 accelerate>=0.33.0
 safetensors
-prodigyopt
-dadaptation
-xformers
+# Optional: prodigyopt dadaptation xformers (install manually if needed)
