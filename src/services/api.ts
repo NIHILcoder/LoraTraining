@@ -111,16 +111,53 @@ export async function uploadImage(
   _datasetId: string,
   file: File & { path?: string }
 ): Promise<DatasetImage> {
-  await delay(500 + Math.random() * 1000);
-  const url = URL.createObjectURL(file);
+  // Simulate minor upload delay
+  await delay(100 + Math.random() * 200);
+  
+  // Generate a lightweight thumbnail using Canvas to prevent UI freezing
+  const thumbUrl = await new Promise<string>((resolve) => {
+    const img = new Image();
+    const objectUrl = URL.createObjectURL(file);
+    
+    img.onload = () => {
+      const canvas = document.createElement('canvas');
+      const MAX_SIZE = 256;
+      let width = img.width;
+      let height = img.height;
+
+      if (width > height) {
+        if (width > MAX_SIZE) {
+          height *= MAX_SIZE / width;
+          width = MAX_SIZE;
+        }
+      } else {
+        if (height > MAX_SIZE) {
+          width *= MAX_SIZE / height;
+          height = MAX_SIZE;
+        }
+      }
+      
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext('2d');
+      if (ctx) {
+        ctx.drawImage(img, 0, 0, width, height);
+      }
+      
+      resolve(canvas.toDataURL('image/jpeg', 0.7));
+      URL.revokeObjectURL(objectUrl); // Free up raw image memory
+    };
+    img.src = objectUrl;
+  });
+
   return {
     id: generateId(),
     filename: file.name,
-    url,
+    url: thumbUrl,
     filePath: file.path, 
     size: file.size,
-    width: 1024,
-    height: 1024,
+    width: 1024, // Mocked original width
+    height: 1024, // Mocked original height
     uploadedAt: new Date().toISOString(),
   };
 }

@@ -88,18 +88,49 @@ async def auto_caption(req: CaptionRequest):
 
         raw_image = Image.open(req.imageUrl).convert('RGB')
         
-        # Generate caption
+        # Generate multiple diverse captions
         inputs = processor(raw_image, return_tensors="pt")
-        out = blip_model.generate(**inputs, max_new_tokens=40)
-        caption = processor.decode(out[0], skip_special_tokens=True)
+        out = blip_model.generate(
+            **inputs, 
+            max_new_tokens=50,
+            num_return_sequences=3,
+            do_sample=True,
+            top_k=30,
+            temperature=0.7
+        )
         
-        # Convert sentence into tags for the UI (simple splitting logic)
-        tags = [caption] # Keep full sentence as a tag too
-        words = [w.replace(',','').strip() for w in caption.split(" ")]
-        clean_words = [w for w in words if len(w) > 2 and w not in ["the", "and", "with", "a", "an", "of", "in", "on", "at"]]
+        captions = processor.batch_decode(out, skip_special_tokens=True)
+        main_caption = captions[0]
         
-        # Combine unique items
-        return {"tags": list(set(tags + clean_words))}
+        # The best universal approach for modern LoRA training:
+        # 1. Provide the full main caption as the first "tag" (Best for SDXL/Flux)
+        tags = [main_caption]
+        
+        # 2. Extract keywords from ALL generated captions (Best for SD1.5/Anime)
+        stop_words = {
+            "a", "an", "the", "and", "but", "or", "for", "nor", "on", "at", "in", "with", "by", "from", 
+            "up", "about", "into", "over", "after", "is", "are", "was", "were", "be", "been", "being", 
+            "have", "has", "had", "do", "does", "did", "of", "to", "it", "that", "this", "there", "their", 
+            "they", "he", "she", "his", "her", "him", "its", "some", "many", "few", "all", "any", "no", 
+            "not", "very", "too", "so", "just", "can", "will", "would", "could", "should", "what", "which", 
+            "who", "when", "where", "why", "how", "background", "foreground", "picture", "image", "photo", 
+            "photography", "showing", "view", "close", "standing", "sitting", "looking"
+        }
+        
+        keyword_set = set()
+        for cap in captions:
+            words = [w.strip(".,!?\"'()[]") for w in cap.lower().split()]
+            for w in words:
+                if len(w) > 2 and w not in stop_words and not w.isdigit():
+                    keyword_set.add(w)
+                    
+        # Sort keywords alphabetically for neatness
+        sorted_keywords = sorted(list(keyword_set))
+        
+        # Combine: Main Caption first, then individual keywords
+        final_tags = tags + sorted_keywords
+        
+        return {"tags": final_tags}
         
     except Exception as e:
         print("Captioning error:", e)

@@ -22,6 +22,7 @@ import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { Badge } from '../components/ui/Badge';
 import { ProgressBar } from '../components/ui/ProgressBar';
+import { Modal } from '../components/ui/Modal';
 import { useApp } from '../context/AppContext';
 import { useWebSocket } from '../hooks/useWebSocket';
 import { startTraining, stopTraining, pauseTraining } from '../services/api';
@@ -36,6 +37,7 @@ export function TrainingPage() {
   };
   
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [isStopModalOpen, setIsStopModalOpen] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
 
   // WebSocket for live updates
@@ -130,19 +132,24 @@ export function TrainingPage() {
     }
   };
 
-  const handleStop = async () => {
+  const handleStopClick = () => {
     if (!sessionId) return;
-    if (confirm('Are you sure you want to stop training? Progress will be lost.')) {
-      try {
-        await stopTraining(sessionId);
-        dispatch({
-          type: 'SET_TRAINING_STATUS',
-          payload: { phase: 'idle' },
-        });
-        setSessionId(null);
-      } catch (err) {
-        console.error(err);
-      }
+    setIsStopModalOpen(true);
+  };
+
+  const confirmStop = async () => {
+    if (!sessionId) return;
+    try {
+      await stopTraining(sessionId);
+      dispatch({
+        type: 'SET_TRAINING_STATUS',
+        payload: { phase: 'idle' },
+      });
+      setSessionId(null);
+    } catch (err) {
+      console.error(err);
+    } finally {
+      setIsStopModalOpen(false);
     }
   };
 
@@ -187,7 +194,7 @@ export function TrainingPage() {
                 <Button
                   variant="danger"
                   icon={<Square size={16} />}
-                  onClick={handleStop}
+                  onClick={handleStopClick}
                 >
                   Stop
                 </Button>
@@ -326,6 +333,20 @@ export function TrainingPage() {
           </Card>
         </div>
       </div>
+
+      <Modal isOpen={isStopModalOpen} onClose={() => setIsStopModalOpen(false)} title="Stop Training">
+        <p style={{ marginBottom: '1.5rem', color: 'var(--color-text-secondary)' }}>
+          Are you sure you want to stop training? Progress will be lost.
+        </p>
+        <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '0.75rem' }}>
+          <Button variant="secondary" onClick={() => setIsStopModalOpen(false)}>
+            Cancel
+          </Button>
+          <Button variant="danger" onClick={confirmStop}>
+            Stop
+          </Button>
+        </div>
+      </Modal>
     </div>
   );
 }
