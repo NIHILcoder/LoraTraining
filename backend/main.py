@@ -214,12 +214,21 @@ blip_model = None
 async def auto_caption(req: CaptionRequest):
     global processor, blip_model
     
-    if processor is None:
+    if processor is None or blip_model is None:
         print("Loading BLIP model on first request...")
         from transformers import BlipProcessor, BlipForConditionalGeneration
-        processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
-        blip_model = BlipForConditionalGeneration.from_pretrained("Salesforce/blip-image-captioning-base")
-        print("BLIP loaded successfully.")
+        try:
+            processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            blip_model = BlipForConditionalGeneration.from_pretrained(
+                "Salesforce/blip-image-captioning-base",
+                use_safetensors=True,
+            )
+            print("BLIP loaded successfully.")
+        except Exception as e:
+            print(f"Failed to load BLIP model: {e}")
+            processor = None
+            blip_model = None
+            return {"tags": ["model failed to load"]}
 
     try:
         from PIL import Image

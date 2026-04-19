@@ -36,7 +36,7 @@ def get_gpu_info() -> Dict[str, Any]:
     
     info["available"] = True
     info["name"] = torch.cuda.get_device_name(0)
-    info["vram_bytes"] = torch.cuda.get_device_properties(0).total_mem
+    info["vram_bytes"] = torch.cuda.get_device_properties(0).total_memory
     info["vram_gb"] = round(info["vram_bytes"] / (1024 ** 3), 1)
     info["compute_capability"] = torch.cuda.get_device_properties(0).major, torch.cuda.get_device_properties(0).minor
     # bf16 requires compute capability >= 8.0 (Ampere+)
@@ -531,7 +531,7 @@ class LoRATrainer:
                     encoder_hidden_states = text_encoder(input_ids)[0]
             
             # Sample noise
-            noise = torch.randn_like(latents, generator=generator)
+            noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
             
             # Add noise to latents

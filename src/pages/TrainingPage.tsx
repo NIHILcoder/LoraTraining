@@ -205,7 +205,7 @@ export function TrainingPage() {
                 variant="primary"
                 icon={<Play size={16} />}
                 onClick={handleStart}
-                disabled={!dataset || status.phase === 'error'}
+                disabled={!dataset}
               >
                 Start Training
               </Button>
