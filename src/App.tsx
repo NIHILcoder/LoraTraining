@@ -4,6 +4,7 @@ import { AppProvider } from './context/AppContext';
 import { Sidebar } from './components/layout/Sidebar';
 import { DatasetPage } from './pages/DatasetPage';
 import { ConfigPage } from './pages/ConfigPage';
+import { ModelsPage } from './pages/ModelsPage';
 import { TrainingPage } from './pages/TrainingPage';
 import { GalleryPage } from './pages/GalleryPage';
 import { PlaygroundPage } from './pages/PlaygroundPage';
@@ -23,6 +24,7 @@ export function App() {
                 <Routes>
                   <Route path="/" element={<DatasetPage />} />
                   <Route path="/config" element={<ConfigPage />} />
+                  <Route path="/models" element={<ModelsPage />} />
                   <Route path="/training" element={<TrainingPage />} />
                   <Route path="/playground" element={<PlaygroundPage />} />
                   <Route path="/gallery" element={<GalleryPage />} />

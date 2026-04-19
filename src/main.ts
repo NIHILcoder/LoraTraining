@@ -5,6 +5,8 @@ function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1280,
     height: 800,
+    minWidth: 1024,
+    minHeight: 700,
     frame: false, // Completely hide the standard titlebar
     webPreferences: {
       nodeIntegration: true,

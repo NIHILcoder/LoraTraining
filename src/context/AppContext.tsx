@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
-import type { AppState, AppAction, TrainingConfig, TrainingStatus } from '../types';
+import type { AppState, AppAction, TrainingConfig, TrainingStatus, BaseModel } from '../types';
 
 const defaultConfig: TrainingConfig = {
   id: 'default',
@@ -40,6 +40,8 @@ const initialState: AppState = {
   trainingConfig: defaultConfig,
   trainingStatus: defaultTrainingStatus,
   models: [],
+  baseModels: [],
+  modelsDirectory: '',
   wsConnected: false,
 };
 
@@ -138,6 +140,29 @@ function appReducer(state: AppState, action: AppAction): AppState {
 
     case 'SET_WS_CONNECTED':
       return { ...state, wsConnected: action.payload };
+
+    case 'SET_BASE_MODELS':
+      return { ...state, baseModels: action.payload };
+
+    case 'UPDATE_BASE_MODEL':
+      return {
+        ...state,
+        baseModels: state.baseModels.map((m) =>
+          m.id === action.payload.id ? { ...m, ...action.payload } : m
+        ),
+      };
+
+    case 'ADD_BASE_MODEL':
+      return { ...state, baseModels: [...state.baseModels, action.payload] };
+
+    case 'REMOVE_BASE_MODEL':
+      return {
+        ...state,
+        baseModels: state.baseModels.filter((m) => m.id !== action.payload),
+      };
+
+    case 'SET_MODELS_DIRECTORY':
+      return { ...state, modelsDirectory: action.payload };
 
     default:
       return state;

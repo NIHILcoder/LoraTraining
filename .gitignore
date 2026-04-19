@@ -39,6 +39,10 @@ pip-delete-this-directory.txt
 datasets/
 models/
 outputs/
+backend/models/
+backend/training_data/
+backend/output/
+backend/settings.json
 
 # Environment Variables
 .env

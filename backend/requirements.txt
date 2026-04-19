@@ -6,3 +6,9 @@ torch
 torchvision
 transformers
 Pillow
+aiohttp
+aiofiles
+diffusers>=0.30.0
+peft>=0.12.0
+accelerate>=0.33.0
+safetensors

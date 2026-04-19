@@ -97,16 +97,43 @@ export function TrainingPage() {
       alert('Please select or upload a dataset first.');
       return;
     }
+    if (dataset.images.length === 0) {
+      alert('Dataset is empty. Please add images before training.');
+      return;
+    }
+    // Validate images have file paths
+    const imagesWithPaths = dataset.images.filter(img => img.filePath);
+    if (imagesWithPaths.length === 0) {
+      alert('No images with local file paths found. Please re-upload your images.');
+      return;
+    }
     try {
       dispatch({
         type: 'SET_TRAINING_STATUS',
-        payload: { phase: 'preparing', totalSteps: config.trainingSteps },
+        payload: { phase: 'preparing', totalSteps: config.trainingSteps, lossHistory: [], logs: [] },
       });
-      const res = await startTraining(config, dataset.id);
-      setSessionId(res.sessionId);
       
-      // Let the python backend know that it should start generating WS updates for this session
-      if (isConnected) {
+      // Send images data (filePaths + captions) for dataset preparation
+      const imageData = imagesWithPaths.map(img => ({
+        filePath: img.filePath,
+        captions: img.captions || [],
+      }));
+      
+      const res = await startTraining(config, imageData);
+      
+      if (res.error) {
+        alert(res.error);
+        dispatch({
+          type: 'SET_TRAINING_STATUS',
+          payload: { phase: 'idle' },
+        });
+        return;
+      }
+      
+      setSessionId(res.sessionId || null);
+      
+      // Let the python backend know that it should start the real training for this session
+      if (isConnected && res.sessionId) {
          send({ type: 'start_training', payload: { sessionId: res.sessionId } });
       }
       

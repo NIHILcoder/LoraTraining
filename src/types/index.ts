@@ -2,6 +2,29 @@
 // LoRA Training Dashboard — Type Definitions
 // ============================================
 
+// --- Base Model Types ---
+export type ModelArchitecture = 'sd15' | 'sdxl' | 'flux';
+export type ModelDownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded' | 'error' | 'verifying';
+
+export interface BaseModel {
+  id: string;
+  name: string;
+  shortName: string;
+  description: string;
+  architecture: ModelArchitecture;
+  fileSize: number;
+  filename: string;
+  downloadUrl: string;
+  sha256?: string;
+  status: ModelDownloadStatus;
+  downloadProgress?: number;
+  downloadSpeed?: string;
+  downloadedBytes?: number;
+  localPath?: string;
+  error?: string;
+  isCustom?: boolean;
+}
+
 // --- Dataset Types ---
 export interface DatasetImage {
   id: string;
@@ -121,7 +144,10 @@ export type WSMessage =
   | { type: 'training_step'; data: TrainingStep }
   | { type: 'training_log'; data: LogEntry }
   | { type: 'training_complete'; data: { modelId: string } }
-  | { type: 'training_error'; data: { message: string } };
+  | { type: 'training_error'; data: { message: string } }
+  | { type: 'download_progress'; data: { modelId: string; progress: number; speed: string; downloadedBytes: number; totalBytes: number } }
+  | { type: 'download_complete'; data: { modelId: string; localPath: string } }
+  | { type: 'download_error'; data: { modelId: string; message: string } };
 
 // --- App State ---
 export interface AppState {
@@ -130,6 +156,8 @@ export interface AppState {
   trainingConfig: TrainingConfig;
   trainingStatus: TrainingStatus;
   models: LoraModel[];
+  baseModels: BaseModel[];
+  modelsDirectory: string;
   wsConnected: boolean;
 }
 
@@ -145,4 +173,9 @@ export type AppAction =
   | { type: 'ADD_LOG'; payload: LogEntry }
   | { type: 'SET_MODELS'; payload: LoraModel[] }
   | { type: 'ADD_MODEL'; payload: LoraModel }
-  | { type: 'SET_WS_CONNECTED'; payload: boolean };
+  | { type: 'SET_WS_CONNECTED'; payload: boolean }
+  | { type: 'SET_BASE_MODELS'; payload: BaseModel[] }
+  | { type: 'UPDATE_BASE_MODEL'; payload: { id: string } & Partial<BaseModel> }
+  | { type: 'ADD_BASE_MODEL'; payload: BaseModel }
+  | { type: 'REMOVE_BASE_MODEL'; payload: string }
+  | { type: 'SET_MODELS_DIRECTORY'; payload: string };

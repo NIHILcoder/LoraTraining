@@ -201,14 +201,20 @@ export async function deleteModel(_modelId: string): Promise<void> {
 
 export async function startTraining(
   config: TrainingConfig,
-  _datasetId: string
-): Promise<{ sessionId: string }> {
+  images: { filePath?: string; captions?: string[] }[]
+): Promise<{ sessionId?: string; error?: string }> {
   const response = await fetch(`${API_BASE}/training/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(config),
+    body: JSON.stringify({ config, images }),
   });
   if (!response.ok) throw new Error('Failed to start training');
+  return response.json();
+}
+
+export async function fetchGpuInfo(): Promise<any> {
+  const response = await fetch(`${API_BASE}/gpu/info`);
+  if (!response.ok) throw new Error('Failed to fetch GPU info');
   return response.json();
 }
 
@@ -221,6 +227,66 @@ export async function stopTraining(sessionId: string): Promise<void> {
 
 export async function pauseTraining(_sessionId: string): Promise<void> {
   await delay(200);
+}
+
+// --- Base Model Management ---
+
+export async function fetchBaseModels(): Promise<{ models: any[]; modelsDirectory: string }> {
+  const response = await fetch(`${API_BASE}/models/base`);
+  if (!response.ok) throw new Error('Failed to fetch base models');
+  return response.json();
+}
+
+export async function downloadBaseModel(modelId: string): Promise<{ status: string }> {
+  const response = await fetch(`${API_BASE}/models/base/${modelId}/download`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to start download');
+  return response.json();
+}
+
+export async function cancelBaseModelDownload(modelId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/models/base/${modelId}/cancel`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to cancel download');
+}
+
+export async function deleteBaseModel(modelId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/models/base/${modelId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) throw new Error('Failed to delete model');
+}
+
+export async function addCustomModel(
+  url: string,
+  name?: string,
+  architecture?: string
+): Promise<any> {
+  const response = await fetch(`${API_BASE}/models/base/custom`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ url, name, architecture }),
+  });
+  if (!response.ok) throw new Error('Failed to add custom model');
+  return response.json();
+}
+
+export async function setModelsDirectory(path: string): Promise<{ modelsDirectory: string }> {
+  const response = await fetch(`${API_BASE}/models/directory`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) throw new Error('Failed to set models directory');
+  return response.json();
+}
+
+export async function getModelsDirectory(): Promise<{ modelsDirectory: string }> {
+  const response = await fetch(`${API_BASE}/models/directory`);
+  if (!response.ok) throw new Error('Failed to get models directory');
+  return response.json();
 }
 
 export { generateId };
