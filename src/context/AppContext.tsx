@@ -1,5 +1,5 @@
 import React, { createContext, useContext, useReducer, ReactNode } from 'react';
-import type { AppState, AppAction, TrainingConfig, TrainingStatus, BaseModel } from '../types';
+import type { AppState, AppAction, TrainingConfig, TrainingStatus, BaseModel, DatasetImage } from '../types';
 
 const defaultConfig: TrainingConfig = {
   id: 'default',
@@ -75,11 +75,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
       const currentDataset =
         state.currentDataset?.id === action.payload.datasetId
           ? {
-              ...state.currentDataset,
-              images: state.currentDataset.images.filter(
-                (img) => img.id !== action.payload.imageId
-              ),
-            }
+            ...state.currentDataset,
+            images: state.currentDataset.images.filter(
+              (img) => img.id !== action.payload.imageId
+            ),
+          }
           : state.currentDataset;
       return { ...state, datasets, currentDataset };
     }
@@ -91,11 +91,11 @@ function appReducer(state: AppState, action: AppAction): AppState {
       const datasets = state.datasets.map(ds =>
         ds.id === action.payload.datasetId ? { ...ds, images: updateImages(ds.images) } : ds
       );
-      
+
       const currentDataset = state.currentDataset?.id === action.payload.datasetId
         ? { ...state.currentDataset, images: updateImages(state.currentDataset.images) }
         : state.currentDataset;
-        
+
       return { ...state, datasets, currentDataset };
     }
 

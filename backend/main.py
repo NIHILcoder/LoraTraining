@@ -4,6 +4,8 @@ import uuid
 import random
 import os
 import json
+import shutil
+import aiofiles
 from pathlib import Path
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
@@ -651,17 +653,25 @@ async def get_models_directory():
 async def run_download(model_id: str, url: str, filename: str, models_dir: Path):
     """Download a model file with real-time progress broadcasting."""
     import aiohttp
+    import aiofiles
+    import shutil
     
     part_path = models_dir / (filename + ".part")
     final_path = models_dir / filename
     
+    print(f"[Download] Starting: {filename}")
+    print(f"[Download] URL: {url}")
+    
     try:
         async with aiohttp.ClientSession() as session:
-            async with session.get(url) as response:
+            # Hugging Face and some other hosts need follow_redirects=True (default in aiohttp)
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=None)) as response:
                 if response.status != 200:
+                    error_msg = f"HTTP {response.status}: {response.reason}"
+                    print(f"[Download] Error: {error_msg}")
                     await broadcast_to_connections({
                         "type": "download_error",
-                        "data": {"modelId": model_id, "message": f"HTTP {response.status}: {response.reason}"}
+                        "data": {"modelId": model_id, "message": error_msg}
                     })
                     return
                 
@@ -671,25 +681,26 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                 start_time = time.time()
                 chunk_times = []
                 
-                with open(part_path, "wb") as f:
+                print(f"[Download] Total size: {total_size / (1024**3):.2f} GB")
+                
+                # Use aiofiles for non-blocking disk I/O
+                async with aiofiles.open(part_path, mode="wb") as f:
                     async for chunk in response.content.iter_chunked(1024 * 1024):  # 1MB chunks
                         if model_id not in active_downloads:
+                            print(f"[Download] Interrupted: {model_id}")
                             break
                         
-                        f.write(chunk)
+                        await f.write(chunk)
                         downloaded += len(chunk)
                         
                         # Track speed
                         now = time.time()
                         chunk_times.append((now, len(chunk)))
-                        # Keep only last 10 seconds of data for speed calc
-                        chunk_times = [(t, s) for t, s in chunk_times if now - t < 10]
+                        chunk_times = [(t, s) for t, s in chunk_times if now - t < 5] # 5 sec window
                         
-                        # Broadcast progress every 500ms
+                        # Broadcast progress
                         if now - last_broadcast >= 0.5:
                             last_broadcast = now
-                            
-                            # Calculate speed
                             if len(chunk_times) > 1:
                                 duration = chunk_times[-1][0] - chunk_times[0][0]
                                 total_bytes_in_window = sum(s for _, s in chunk_times)
@@ -697,14 +708,7 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                             else:
                                 speed = 0
                             
-                            # Format speed
-                            if speed > 1024 * 1024:
-                                speed_str = f"{speed / (1024 * 1024):.1f} MB/s"
-                            elif speed > 1024:
-                                speed_str = f"{speed / 1024:.1f} KB/s"
-                            else:
-                                speed_str = f"{speed:.0f} B/s"
-                            
+                            speed_str = f"{speed / (1024*1024):.1f} MB/s" if speed > 1024*1024 else f"{speed/1024:.1f} KB/s"
                             progress = (downloaded / total_size * 100) if total_size > 0 else 0
                             
                             await broadcast_to_connections({
@@ -718,11 +722,22 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                                 }
                             })
                 
-                # Rename .part to final filename
+                # Verify we got everything
                 if model_id in active_downloads:
+                    if total_size > 0 and downloaded < total_size:
+                        raise Exception(f"Download incomplete: {downloaded}/{total_size} bytes")
+                    
+                    print(f"[Download] Finishing: {filename}...")
+                    
+                    # Small delay to let OS release file handles on Windows
+                    await asyncio.sleep(0.5)
+                    
+                    # Use shutil.move for more robust cross-platform moving/renaming
                     if final_path.exists():
                         final_path.unlink()
-                    part_path.rename(final_path)
+                    shutil.move(str(part_path), str(final_path))
+                    
+                    print(f"[Download] Success: {final_path}")
                     
                     await broadcast_to_connections({
                         "type": "download_complete",
@@ -730,14 +745,20 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                     })
                     
     except asyncio.CancelledError:
+        print(f"[Download] Cancelled: {filename}")
         if part_path.exists():
             part_path.unlink()
     except Exception as e:
+        error_msg = str(e)
+        print(f"[Download] FAILED: {filename} - {error_msg}")
         await broadcast_to_connections({
             "type": "download_error",
-            "data": {"modelId": model_id, "message": str(e)}
+            "data": {"modelId": model_id, "message": error_msg}
         })
         if part_path.exists():
-            part_path.unlink()
+            try:
+                part_path.unlink()
+            except:
+                pass
     finally:
         active_downloads.pop(model_id, None)
