@@ -309,6 +309,223 @@ async def get_training_output(session_id: str):
         return {"path": str(safetensors[0]), "dir": str(output_dir)}
     return {"error": "No .safetensors file found"}
 
+
+# ============================================
+# Playground — Inference Engine
+# ============================================
+
+# Lazy-loaded inference pipeline cache: (model_path, lora_path) -> pipeline
+_inference_cache: dict = {}
+_inference_lock = asyncio.Lock()
+GENERATED_DIR = BACKEND_DIR / "generated"
+GENERATED_DIR.mkdir(exist_ok=True)
+
+class GenerateRequest(PydanticBase):
+    prompt: str
+    negativePrompt: Optional[str] = ""
+    width: int = 1024
+    height: int = 1024
+    cfgScale: float = 7.0
+    steps: int = 25
+    seed: int = -1
+    sampler: str = "Euler a"
+    loraWeight: float = 1.0
+    loraModelId: Optional[str] = None   # id of the trained LoRA from Gallery
+    baseModelId: Optional[str] = None   # id from MODEL_CATALOG (sd15, sdxl, ...)
+
+@app.post("/api/playground/generate")
+async def generate_image(req: GenerateRequest):
+    """
+    Run inference with optional LoRA injection.
+    Uses diffusers when a GPU+model is available, otherwise returns an informative mock.
+    """
+    import gc, torch, base64, io
+    from PIL import Image, ImageDraw, ImageFont
+
+    actual_seed = req.seed if req.seed >= 0 else random.randint(0, 2**31 - 1)
+
+    # --- Resolve base model path ---
+    models_dir = get_models_dir()
+    model_path = None
+
+    # If caller specified a baseModelId, find that model
+    target_arch = req.baseModelId or "sd15"
+    for m in MODEL_CATALOG:
+        if m["architecture"] == target_arch or m["id"] == target_arch:
+            candidate = models_dir / m["filename"]
+            if candidate.exists():
+                model_path = str(candidate)
+                target_arch = m["architecture"]
+                break
+
+    # Also check any downloaded model
+    if not model_path:
+        for m in MODEL_CATALOG:
+            candidate = models_dir / m["filename"]
+            if candidate.exists():
+                model_path = str(candidate)
+                target_arch = m["architecture"]
+                break
+
+    # --- Resolve LoRA path ---
+    lora_path = None
+    if req.loraModelId and req.loraModelId != "none":
+        lora_dir = OUTPUT_DIR / req.loraModelId
+        safetensors = list(lora_dir.glob("*.safetensors")) if lora_dir.exists() else []
+        if safetensors:
+            lora_path = str(safetensors[0])
+
+    # --- Check GPU ---
+    gpu_available = torch.cuda.is_available()
+
+    if not model_path or not gpu_available:
+        # Return informative mock SVG with generation parameters
+        reason = "No GPU detected" if not gpu_available else f"No base model downloaded (looked for {target_arch.upper()})"
+        svg = _make_mock_svg(req.prompt, req.seed if req.seed >= 0 else actual_seed, req.sampler, req.loraWeight if lora_path else None, reason)
+        return {"url": svg, "seed": actual_seed, "mock": True, "reason": reason}
+
+    # --- Real inference ---
+    try:
+        pipe = await asyncio.to_thread(
+            _load_pipeline, model_path, lora_path, req.loraWeight, target_arch
+        )
+
+        result_image = await asyncio.to_thread(
+            _run_inference, pipe, req, actual_seed
+        )
+
+        # Save to disk and return as data URL
+        img_id = str(uuid.uuid4())[:8]
+        img_path = GENERATED_DIR / f"{img_id}.png"
+        result_image.save(str(img_path), "PNG")
+
+        buffered = io.BytesIO()
+        result_image.save(buffered, format="PNG")
+        img_b64 = base64.b64encode(buffered.getvalue()).decode()
+        data_url = f"data:image/png;base64,{img_b64}"
+
+        return {"url": data_url, "seed": actual_seed, "mock": False}
+
+    except Exception as e:
+        print(f"[Inference] Error: {e}")
+        svg = _make_mock_svg(req.prompt, actual_seed, req.sampler, None, f"Inference error: {str(e)[:80]}")
+        return {"url": svg, "seed": actual_seed, "mock": True, "reason": str(e)}
+
+
+def _load_pipeline(model_path: str, lora_path: Optional[str], lora_weight: float, architecture: str):
+    """Load (or retrieve from cache) the inference pipeline with optional LoRA."""
+    import torch
+    from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline, DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler
+
+    cache_key = (model_path, lora_path, round(lora_weight, 2))
+    if cache_key in _inference_cache:
+        return _inference_cache[cache_key]
+
+    # Clear cache to free VRAM (keep at most 1 pipeline)
+    _inference_cache.clear()
+    import gc, torch
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+
+    dtype = torch.float16
+    device = "cuda"
+
+    if architecture in ("sdxl", "kolors"):
+        pipe = StableDiffusionXLPipeline.from_single_file(
+            model_path, torch_dtype=dtype, use_safetensors=True, variant="fp16"
+        )
+    else:
+        pipe = StableDiffusionPipeline.from_single_file(
+            model_path, torch_dtype=dtype, use_safetensors=True,
+        )
+
+    pipe = pipe.to(device)
+    pipe.enable_attention_slicing()
+
+    try:
+        pipe.enable_xformers_memory_efficient_attention()
+    except Exception:
+        pass
+
+    # Inject LoRA if provided
+    if lora_path:
+        try:
+            from peft import LoraConfig
+            from safetensors.torch import load_file
+            lora_sd = load_file(lora_path)
+            pipe.unet.load_attn_procs(lora_sd)
+            print(f"[Inference] LoRA loaded: {lora_path} weight={lora_weight}")
+        except Exception as e:
+            print(f"[Inference] LoRA load warning: {e}")
+
+    _inference_cache[cache_key] = pipe
+    return pipe
+
+
+def _run_inference(pipe, req: GenerateRequest, seed: int):
+    """Run the actual diffusion inference."""
+    import torch
+    from diffusers import (
+        EulerAncestralDiscreteScheduler,
+        DPMSolverMultistepScheduler,
+        DPMSolverSinglestepScheduler,
+    )
+
+    # Set sampler
+    sampler_lower = req.sampler.lower()
+    if "euler a" in sampler_lower or "euler ancestral" in sampler_lower:
+        pipe.scheduler = EulerAncestralDiscreteScheduler.from_config(pipe.scheduler.config)
+    elif "dpm++ 2m" in sampler_lower:
+        pipe.scheduler = DPMSolverMultistepScheduler.from_config(
+            pipe.scheduler.config, use_karras_sigmas="karras" in sampler_lower
+        )
+    elif "dpm++ sde" in sampler_lower:
+        pipe.scheduler = DPMSolverSinglestepScheduler.from_config(
+            pipe.scheduler.config, use_karras_sigmas="karras" in sampler_lower
+        )
+
+    generator = torch.Generator(device="cuda").manual_seed(seed)
+
+    result = pipe(
+        prompt=req.prompt,
+        negative_prompt=req.negativePrompt or "",
+        width=req.width,
+        height=req.height,
+        guidance_scale=req.cfgScale,
+        num_inference_steps=req.steps,
+        generator=generator,
+        cross_attention_kwargs={"scale": req.loraWeight} if req.loraWeight != 1.0 else None,
+    )
+    return result.images[0]
+
+
+def _make_mock_svg(prompt: str, seed: int, sampler: str, lora_weight, reason: str) -> str:
+    """Generate an informative SVG placeholder when inference can't run."""
+    import urllib.parse
+    prompt_short = (prompt[:55] + "…") if len(prompt) > 55 else prompt
+    lora_line = f"LoRA Weight: {lora_weight} | {sampler}" if lora_weight is not None else f"No LoRA | {sampler}"
+
+    svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0f0f1a"/>
+      <stop offset="100%" stop-color="#1a1a2e"/>
+    </linearGradient>
+  </defs>
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <rect x="1" y="1" width="510" height="510" fill="none" stroke="#2a2a4a" stroke-width="2"/>
+  <line x1="1" y1="1" x2="511" y2="511" stroke="#2a2a4a" stroke-width="1"/>
+  <line x1="511" y1="1" x2="1" y2="511" stroke="#2a2a4a" stroke-width="1"/>
+  <text x="256" y="195" text-anchor="middle" fill="#ffffff" font-size="18" font-family="monospace" font-weight="bold">Simulated Inference</text>
+  <text x="256" y="235" text-anchor="middle" fill="#888" font-size="13" font-family="monospace">{prompt_short}</text>
+  <text x="256" y="285" text-anchor="middle" fill="#7c6af5" font-size="13" font-family="monospace">{lora_line}</text>
+  <text x="256" y="320" text-anchor="middle" fill="#555" font-size="11" font-family="monospace">Seed: {seed} | CFG: — | Steps: —</text>
+  <text x="256" y="370" text-anchor="middle" fill="#ef4444" font-size="11" font-family="monospace">{reason}</text>
+</svg>'''
+    return "data:image/svg+xml," + urllib.parse.quote(svg)
+
+
 class CaptionRequest(PydanticBase):
     imageId: str
     imageUrl: Optional[str] = None # Will contain the local File path from Electron
@@ -881,3 +1098,108 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                 pass
     finally:
         active_downloads.pop(model_id, None)
+
+
+# ============================================
+# Gallery — Trained LoRA Models
+# ============================================
+
+@app.get("/api/gallery/models")
+async def list_trained_models():
+    """Scan the output directory for trained LoRA models."""
+    models = []
+    
+    if not OUTPUT_DIR.exists():
+        return {"models": []}
+    
+    for session_dir in sorted(OUTPUT_DIR.iterdir(), reverse=True):
+        if not session_dir.is_dir():
+            continue
+        
+        # Look for .safetensors files
+        safetensors = list(session_dir.glob("*.safetensors"))
+        if not safetensors:
+            continue
+        
+        lora_file = safetensors[0]
+        file_size = lora_file.stat().st_size
+        created_at = lora_file.stat().st_ctime
+        
+        # Try to read training metadata (adapter_config.json from peft)
+        metadata = {}
+        adapter_config = session_dir / "adapter_config.json"
+        if adapter_config.exists():
+            try:
+                metadata = json.loads(adapter_config.read_text())
+            except Exception:
+                pass
+        
+        # Try to read our own training result metadata
+        result_file = session_dir / "training_result.json"
+        result_data = {}
+        if result_file.exists():
+            try:
+                result_data = json.loads(result_file.read_text())
+            except Exception:
+                pass
+        
+        model_info = {
+            "id": session_dir.name,
+            "name": lora_file.stem.replace("_", " ").replace("-", " ").title(),
+            "filename": lora_file.name,
+            "fileSize": file_size,
+            "path": str(lora_file),
+            "directory": str(session_dir),
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_at)),
+            # From peft adapter_config
+            "rank": metadata.get("r", metadata.get("lora_alpha", 0)),
+            "alpha": metadata.get("lora_alpha", 0),
+            "targetModules": metadata.get("target_modules", []),
+            # From our training result
+            "finalLoss": result_data.get("final_loss", 0),
+            "avgLoss": result_data.get("avg_loss", 0),
+            "totalSteps": result_data.get("total_steps", 0),
+            "stoppedEarly": result_data.get("stopped_early", False),
+            "architecture": result_data.get("architecture", ""),
+            "baseModelName": result_data.get("base_model_name", ""),
+        }
+        
+        models.append(model_info)
+    
+    return {"models": models}
+
+
+@app.delete("/api/gallery/models/{model_id}")
+async def delete_trained_model(model_id: str):
+    """Delete a trained LoRA model and its directory."""
+    model_dir = OUTPUT_DIR / model_id
+    if not model_dir.exists():
+        return {"error": "Model not found"}
+    
+    try:
+        shutil.rmtree(str(model_dir))
+        return {"status": "deleted"}
+    except Exception as e:
+        return {"error": f"Failed to delete: {e}"}
+
+
+@app.post("/api/gallery/models/{model_id}/open")
+async def open_model_folder(model_id: str):
+    """Open the model folder in the system file explorer."""
+    model_dir = OUTPUT_DIR / model_id
+    if not model_dir.exists():
+        return {"error": "Model folder not found"}
+    
+    import subprocess
+    import sys
+    
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", str(model_dir)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(model_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(model_dir)])
+        return {"status": "opened"}
+    except Exception as e:
+        return {"error": f"Failed to open folder: {e}"}

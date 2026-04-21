@@ -18,7 +18,7 @@ export function App() {
           <div className="app-layout">
             <Sidebar />
             <main className="app-main">
-              <div className="app-content-wrapper">
+              <div className="app-content-wrapper" style={{ height: '100%' }}>
                 <Routes>
                   <Route path="/" element={<TrainingWorkspacePage />} />
                   {/* Legacy redirects */}

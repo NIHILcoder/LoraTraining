@@ -713,20 +713,26 @@ class LoRATrainer:
         lora_filename = f"{safe_name}.safetensors"
         lora_path = output_dir / lora_filename
         
-        # Save using peft
-        unet.save_pretrained(output_dir)
+        # Save in kohya/standard format (single .safetensors file)
+        from peft.utils import get_peft_model_state_dict
+        from safetensors.torch import save_file
+        import json as _json_save
         
-        # Also try to save in the standard kohya format for compatibility
-        try:
-            from peft.utils import get_peft_model_state_dict
-            state_dict = get_peft_model_state_dict(unet)
-            from safetensors.torch import save_file
-            save_file(state_dict, str(lora_path))
-            print(f"[Trainer] LoRA saved: {lora_path}")
-        except Exception as e:
-            print(f"[Trainer] Warning: Could not save in standard format: {e}")
-            # The peft save_pretrained should still work
-            lora_path = output_dir / "adapter_model.safetensors"
+        state_dict = get_peft_model_state_dict(unet)
+        save_file(state_dict, str(lora_path))
+        print(f"[Trainer] LoRA saved: {lora_path}")
+        
+        # Save adapter_config.json separately so Gallery can read rank/alpha metadata
+        adapter_config = {
+            "r": lora_rank,
+            "lora_alpha": network_alpha,
+            "target_modules": list(lora_config.target_modules),
+            "lora_dropout": 0.0,
+            "peft_type": "LORA",
+        }
+        (output_dir / "adapter_config.json").write_text(
+            _json_save.dumps(adapter_config, indent=2)
+        )
         
         # Cleanup
         del unet, optimizer, lr_scheduler
@@ -742,7 +748,26 @@ class LoRATrainer:
             "avg_loss": avg_loss,
             "total_steps": final_step + 1,
             "stopped_early": self._stop_requested,
+            "architecture": architecture,
+            "base_model_name": os.path.basename(model_path),
+            "lora_rank": lora_rank,
+            "network_alpha": network_alpha,
+            "learning_rate": learning_rate,
+            "resolution": resolution,
+            "batch_size": batch_size,
+            "optimizer": optimizer_type,
+            "scheduler": scheduler_type,
+            "seed": seed,
         }
+        
+        # Save training result metadata for Gallery
+        import json as _json
+        result_meta_path = output_dir / "training_result.json"
+        try:
+            result_meta_path.write_text(_json.dumps(result, indent=2, default=str))
+            print(f"[Trainer] Metadata saved: {result_meta_path}")
+        except Exception as e:
+            print(f"[Trainer] Warning: Could not save metadata: {e}")
         
         print(f"[Trainer] Training complete: {result}")
         return result

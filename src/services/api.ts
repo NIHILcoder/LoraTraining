@@ -7,8 +7,6 @@ import type {
   Dataset,
   DatasetImage,
   TrainingConfig,
-  LoraModel,
-  SampleImage,
 } from '../types';
 
 const API_BASE = 'http://localhost:8000/api';
@@ -21,72 +19,6 @@ function generateId(): string {
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
-
-// --- Mock Data ---
-const mockSampleImages: SampleImage[] = [
-  {
-    id: 's1',
-    url: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#1a1a2e"/><text x="128" y="128" text-anchor="middle" fill="#8B5CF6" font-size="14" font-family="sans-serif" dy="0.35em">Sample Gen 1</text></svg>'),
-    prompt: 'a portrait in the style of <lora>',
-    seed: 42,
-    generatedAt: new Date().toISOString(),
-  },
-  {
-    id: 's2',
-    url: 'data:image/svg+xml,' + encodeURIComponent('<svg xmlns="http://www.w3.org/2000/svg" width="256" height="256"><rect width="256" height="256" fill="#1a1a2e"/><text x="128" y="128" text-anchor="middle" fill="#22c55e" font-size="14" font-family="sans-serif" dy="0.35em">Sample Gen 2</text></svg>'),
-    prompt: 'a landscape in the style of <lora>',
-    seed: 123,
-    generatedAt: new Date().toISOString(),
-  },
-];
-
-const mockModels: LoraModel[] = [
-  {
-    id: 'm1',
-    name: 'Portrait Style v1',
-    description: 'Fine-tuned on portrait photography dataset. Best for realistic face generation.',
-    filename: 'portrait_style_v1.safetensors',
-    fileSize: 52428800,
-    rank: 16,
-    alpha: 8,
-    trainingSteps: 2000,
-    finalLoss: 0.0823,
-    config: {} as TrainingConfig,
-    sampleImages: mockSampleImages,
-    createdAt: '2026-04-05T10:30:00Z',
-    tags: ['portrait', 'realistic', 'face'],
-  },
-  {
-    id: 'm2',
-    name: 'Anime Style v2',
-    description: 'Trained on curated anime artwork. Produces consistent anime-style outputs.',
-    filename: 'anime_style_v2.safetensors',
-    fileSize: 38912000,
-    rank: 32,
-    alpha: 16,
-    trainingSteps: 3000,
-    finalLoss: 0.0654,
-    config: {} as TrainingConfig,
-    sampleImages: mockSampleImages,
-    createdAt: '2026-04-07T14:15:00Z',
-    tags: ['anime', 'illustration', 'style'],
-  },
-  {
-    id: 'm3',
-    name: 'Landscape Fine-tune',
-    description: 'Landscape photography enhancement. Improves scenic compositions.',
-    filename: 'landscape_ft.safetensors',
-    fileSize: 41943040,
-    rank: 8,
-    alpha: 4,
-    trainingSteps: 1500,
-    finalLoss: 0.0912,
-    config: {} as TrainingConfig,
-    sampleImages: mockSampleImages,
-    createdAt: '2026-04-08T09:45:00Z',
-    tags: ['landscape', 'nature', 'scenic'],
-  },
-];
 
 // --- API Functions ---
 
@@ -180,7 +112,19 @@ export async function autoCaptionImage(imageId: string, imageUrl: string): Promi
   return data.tags;
 }
 
-export async function generateImage(params: any): Promise<{url: string, seed: number}> {
+export async function generateImage(params: {
+  prompt: string;
+  negativePrompt?: string;
+  width?: number;
+  height?: number;
+  cfgScale?: number;
+  steps?: number;
+  seed?: number;
+  loraWeight?: number;
+  sampler?: string;
+  loraModelId?: string | null;
+  baseModelId?: string | null;
+}): Promise<{url: string, seed: number, mock?: boolean, reason?: string}> {
   const response = await fetch(`${API_BASE}/playground/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -190,13 +134,33 @@ export async function generateImage(params: any): Promise<{url: string, seed: nu
   return response.json();
 }
 
-export async function fetchModels(): Promise<LoraModel[]> {
-  await delay(400);
-  return mockModels;
+export async function fetchAvailableBaseModels(): Promise<{ id: string; name: string; architecture: string; filename: string }[]> {
+  // Returns only models that are actually downloaded (have a local file)
+  const res = await fetch(`${API_BASE}/models/base`);
+  if (!res.ok) return [];
+  const data = await res.json();
+  return (data.models || []).filter((m: any) => m.status === 'downloaded');
 }
 
-export async function deleteModel(_modelId: string): Promise<void> {
-  await delay(300);
+export async function fetchModels(): Promise<any[]> {
+  const response = await fetch(`${API_BASE}/gallery/models`);
+  if (!response.ok) throw new Error('Failed to fetch trained models');
+  const data = await response.json();
+  return data.models;
+}
+
+export async function deleteModel(modelId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/gallery/models/${modelId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) throw new Error('Failed to delete model');
+}
+
+export async function openModelFolder(modelId: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/gallery/models/${modelId}/open`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to open folder');
 }
 
 export async function startTraining(
