@@ -17,11 +17,41 @@ from typing import Optional, Callable, Dict, Any, List
 import torch
 
 # ============================================
-# GPU Detection & Optimization Profiles
+# GPU & System Detection + Optimization Profiles
 # ============================================
 
+# VRAM requirements per architecture (min GB)
+ARCH_VRAM_MIN = {
+    "sd15": 6, "sd21": 6, "sdxl": 8, "sd3": 12,
+    "flux": 16, "cascade": 10, "hunyuan": 16,
+    "pixart": 12, "kolors": 10, "auraflow": 12,
+}
+
+# Base time per step (seconds) at rank=16, 512px, batch=1 — indexed by VRAM tier
+# Tiers: 6, 8, 12, 16, 24 GB
+ARCH_BASE_TIME: Dict[str, Dict[int, float]] = {
+    "sd15":     {6: 1.8, 8: 1.2, 12: 0.8, 16: 0.6, 24: 0.5},
+    "sd21":     {6: 2.0, 8: 1.4, 12: 0.9, 16: 0.7, 24: 0.5},
+    "sdxl":     {8: 3.5, 12: 2.0, 16: 1.5, 24: 1.0},
+    "sd3":      {12: 3.0, 16: 2.0, 24: 1.4},
+    "flux":     {16: 4.0, 24: 2.5},
+    "cascade":  {10: 3.0, 12: 2.5, 16: 1.8, 24: 1.2},
+    "hunyuan":  {16: 3.5, 24: 2.0},
+    "pixart":   {12: 2.5, 16: 1.8, 24: 1.2},
+    "kolors":   {10: 3.2, 12: 2.2, 16: 1.6, 24: 1.1},
+    "auraflow": {12: 2.8, 16: 2.0, 24: 1.3},
+}
+
+# Default native resolution per architecture
+ARCH_NATIVE_RES = {
+    "sd15": 512, "sd21": 768, "sdxl": 1024, "sd3": 1024,
+    "flux": 1024, "cascade": 1024, "hunyuan": 1024,
+    "pixart": 1024, "kolors": 1024, "auraflow": 1024,
+}
+
+
 def get_gpu_info() -> Dict[str, Any]:
-    """Detect GPU and return optimization profile."""
+    """Detect GPU and system RAM."""
     info = {
         "available": False,
         "name": "No GPU",
@@ -29,88 +59,175 @@ def get_gpu_info() -> Dict[str, Any]:
         "vram_bytes": 0,
         "compute_capability": (0, 0),
         "bf16_supported": False,
+        "cuda_version": "",
+        "driver_version": "",
+        "ram_total_gb": 0,
+        "ram_available_gb": 0,
     }
-    
+
+    # RAM detection
+    try:
+        import psutil
+        mem = psutil.virtual_memory()
+        info["ram_total_gb"] = round(mem.total / (1024 ** 3), 1)
+        info["ram_available_gb"] = round(mem.available / (1024 ** 3), 1)
+    except ImportError:
+        # Fallback without psutil
+        try:
+            import os
+            if os.name == 'nt':
+                import ctypes
+                kernel32 = ctypes.windll.kernel32
+                c_ulonglong = ctypes.c_ulonglong
+                class MEMORYSTATUSEX(ctypes.Structure):
+                    _fields_ = [("dwLength", ctypes.c_ulong), ("dwMemoryLoad", ctypes.c_ulong),
+                                ("ullTotalPhys", c_ulonglong), ("ullAvailPhys", c_ulonglong),
+                                ("ullTotalPageFile", c_ulonglong), ("ullAvailPageFile", c_ulonglong),
+                                ("ullTotalVirtual", c_ulonglong), ("ullAvailVirtual", c_ulonglong),
+                                ("sullAvailExtendedVirtual", c_ulonglong)]
+                stat = MEMORYSTATUSEX()
+                stat.dwLength = ctypes.sizeof(stat)
+                kernel32.GlobalMemoryStatusEx(ctypes.byref(stat))
+                info["ram_total_gb"] = round(stat.ullTotalPhys / (1024 ** 3), 1)
+                info["ram_available_gb"] = round(stat.ullAvailPhys / (1024 ** 3), 1)
+        except Exception:
+            pass
+
     if not torch.cuda.is_available():
         return info
-    
+
     info["available"] = True
     info["name"] = torch.cuda.get_device_name(0)
     info["vram_bytes"] = torch.cuda.get_device_properties(0).total_memory
     info["vram_gb"] = round(info["vram_bytes"] / (1024 ** 3), 1)
-    info["compute_capability"] = torch.cuda.get_device_properties(0).major, torch.cuda.get_device_properties(0).minor
-    # bf16 requires compute capability >= 8.0 (Ampere+)
-    info["bf16_supported"] = info["compute_capability"][0] >= 8
-    
+    cc = torch.cuda.get_device_properties(0)
+    info["compute_capability"] = (cc.major, cc.minor)
+    info["bf16_supported"] = cc.major >= 8
+    info["cuda_version"] = torch.version.cuda or ""
+
+    try:
+        info["driver_version"] = str(torch.cuda.get_device_properties(0).name)
+    except Exception:
+        pass
+
     return info
 
 
 def get_optimization_profile(vram_gb: float, architecture: str) -> Dict[str, Any]:
     """
-    Return optimal training settings based on available VRAM and target architecture.
-    
-    Profiles:
-    - SD 1.5: Works on 6GB+ VRAM
-    - SDXL:   Works on 8GB+ VRAM (with optimizations), comfortable at 12GB+
-    - Flux:   Requires 16GB+ VRAM minimum
+    Return optimal training settings for any supported architecture.
+    Supports: sd15, sd21, sdxl, sd3, flux, cascade, hunyuan, pixart, kolors, auraflow
     """
+    min_vram = ARCH_VRAM_MIN.get(architecture, 8)
+    native_res = ARCH_NATIVE_RES.get(architecture, 512)
+
     profile = {
         "gradient_checkpointing": True,
         "mixed_precision": "fp16",
         "enable_xformers": True,
         "gradient_accumulation_steps": 1,
         "max_batch_size": 1,
-        "cache_latents": True,  # Pre-encode images to latents to save VRAM during training
+        "cache_latents": True,
         "train_text_encoder": False,
         "feasible": True,
         "warning": None,
+        "recommended_resolution": native_res,
+        "min_vram": min_vram,
     }
-    
-    if architecture == "sd15":
-        if vram_gb < 4:
-            profile["feasible"] = False
-            profile["warning"] = f"SD 1.5 requires minimum 6 GB VRAM. You have {vram_gb} GB."
-        elif vram_gb < 6:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
-            profile["train_text_encoder"] = False
-            profile["warning"] = f"Low VRAM ({vram_gb} GB). Training with aggressive memory optimizations."
-        elif vram_gb < 10:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
-        else:
+
+    if vram_gb < min_vram:
+        profile["feasible"] = False
+        profile["warning"] = f"{architecture.upper()} requires minimum {min_vram} GB VRAM. You have {vram_gb} GB."
+        return profile
+
+    # UNet-based (SD 1.x, SD 2.x)
+    if architecture in ("sd15", "sd21"):
+        if vram_gb < 8:
+            profile["warning"] = f"Low VRAM ({vram_gb} GB). Using aggressive memory optimizations."
+        elif vram_gb >= 10:
             profile["gradient_checkpointing"] = False
             profile["max_batch_size"] = 2
             profile["train_text_encoder"] = True
-            
-    elif architecture == "sdxl":
-        if vram_gb < 8:
-            profile["feasible"] = False
-            profile["warning"] = f"SDXL requires minimum 8 GB VRAM. You have {vram_gb} GB."
-        elif vram_gb < 12:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
+
+    # SDXL / Kolors (similar arch)
+    elif architecture in ("sdxl", "kolors"):
+        if vram_gb < 12:
             profile["train_text_encoder"] = False
-            profile["warning"] = f"Limited VRAM ({vram_gb} GB) for SDXL. Using maximum memory savings."
-        elif vram_gb < 16:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
-        else:
+            profile["warning"] = f"Limited VRAM ({vram_gb} GB). Maximum memory savings enabled."
+        elif vram_gb >= 16:
             profile["gradient_checkpointing"] = False
             profile["max_batch_size"] = 2
-            
-    elif architecture == "flux":
+
+    # DiT / MMDiT architectures (SD3, PixArt, AuraFlow)
+    elif architecture in ("sd3", "pixart", "auraflow"):
         if vram_gb < 16:
-            profile["feasible"] = False
-            profile["warning"] = f"Flux requires minimum 16 GB VRAM. You have {vram_gb} GB."
-        elif vram_gb < 24:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
-        else:
-            profile["gradient_checkpointing"] = True
-            profile["max_batch_size"] = 1
-    
+            profile["warning"] = f"Limited VRAM ({vram_gb} GB). Training may be slow."
+        elif vram_gb >= 24:
+            profile["max_batch_size"] = 2
+
+    # Transformer architectures (Flux, HunyuanDiT)
+    elif architecture in ("flux", "hunyuan"):
+        # These are large — always gradient checkpoint
+        profile["gradient_checkpointing"] = True
+        if vram_gb < 24:
+            profile["warning"] = f"VRAM ({vram_gb} GB) is tight for {architecture.upper()}. Expect slower training."
+
+    # Cascade (Würstchen)
+    elif architecture == "cascade":
+        if vram_gb < 12:
+            profile["warning"] = f"Limited VRAM ({vram_gb} GB) for Cascade."
+        elif vram_gb >= 16:
+            profile["gradient_checkpointing"] = False
+            profile["max_batch_size"] = 2
+
     return profile
+
+
+def estimate_training_time(
+    architecture: str, steps: int, rank: int = 16,
+    resolution: int = 512, vram_gb: float = 0, batch_size: int = 1,
+) -> Dict[str, Any]:
+    """
+    Estimate training time based on hardware + config.
+    Returns dict with eta_seconds, time_per_step, feasible.
+    """
+    times = ARCH_BASE_TIME.get(architecture, {})
+    native_res = ARCH_NATIVE_RES.get(architecture, 512)
+
+    if not times:
+        return {"eta_seconds": 0, "time_per_step": 0, "feasible": False, "reason": "Unknown architecture"}
+
+    # Find closest VRAM tier
+    tiers = sorted(times.keys())
+    if vram_gb < tiers[0]:
+        return {"eta_seconds": 0, "time_per_step": 0, "feasible": False,
+                "reason": f"Requires {tiers[0]}+ GB VRAM"}
+
+    # Interpolate between tiers
+    base_time = tiers[-1]  # default to highest tier
+    for i, t in enumerate(tiers):
+        if vram_gb < t:
+            # Interpolate between previous and this tier
+            prev_t = tiers[i - 1]
+            frac = (vram_gb - prev_t) / (t - prev_t)
+            base_time = times[prev_t] * (1 - frac) + times[t] * frac
+            break
+        base_time = times[t]
+
+    # Adjustments
+    rank_factor = max(0.5, rank / 16.0)  # Higher rank = slightly more time
+    res_factor = (resolution / native_res) ** 2  # Resolution scales quadratically
+    batch_factor = 1.0 / max(1, batch_size)  # More batch = fewer steps needed effectively
+
+    time_per_step = base_time * rank_factor * res_factor
+    eta_seconds = steps * time_per_step * batch_factor
+
+    return {
+        "eta_seconds": round(eta_seconds),
+        "time_per_step": round(time_per_step, 2),
+        "feasible": True,
+        "reason": None,
+    }
 
 
 # ============================================

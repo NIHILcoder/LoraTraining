@@ -57,31 +57,101 @@ MODEL_CATALOG = [
         "id": "sd15",
         "name": "Stable Diffusion 1.5",
         "shortName": "SD 1.5",
-        "description": "The classic. Lightweight, fast, with a massive community ecosystem of LoRAs. Best for anime and artistic styles.",
+        "description": "The classic. Lightweight, fast, massive community ecosystem. Best for anime and artistic styles.",
         "architecture": "sd15",
         "fileSize": 4265380864,
         "filename": "v1-5-pruned-emaonly.safetensors",
         "downloadUrl": "https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors",
     },
     {
+        "id": "sd21",
+        "name": "Stable Diffusion 2.1",
+        "shortName": "SD 2.1",
+        "description": "Improved v2 with 768px native resolution. Better detail and composition than v1.5.",
+        "architecture": "sd21",
+        "fileSize": 5214865152,
+        "filename": "v2-1_768-ema-pruned.safetensors",
+        "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors",
+    },
+    {
         "id": "sdxl10",
         "name": "Stable Diffusion XL 1.0",
         "shortName": "SDXL",
-        "description": "High-resolution powerhouse. 1024×1024 native. Superior detail and composition for photorealistic and artistic output.",
+        "description": "High-resolution powerhouse. 1024×1024 native. Superior detail for photorealistic output.",
         "architecture": "sdxl",
         "fileSize": 6938078334,
         "filename": "sd_xl_base_1.0.safetensors",
         "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
     },
     {
+        "id": "sd3-medium",
+        "name": "Stable Diffusion 3 Medium",
+        "shortName": "SD3",
+        "description": "MMDiT architecture. State-of-the-art text rendering and prompt adherence.",
+        "architecture": "sd3",
+        "fileSize": 4339718720,
+        "filename": "sd3_medium_incl_clips_t5xxlfp8.safetensors",
+        "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors",
+    },
+    {
         "id": "flux-dev",
         "name": "Flux.1 Dev",
         "shortName": "Flux",
-        "description": "Next-gen architecture by Black Forest Labs. State-of-the-art quality with superior prompt adherence and photorealism.",
+        "description": "Next-gen by Black Forest Labs. Superior quality with best prompt adherence and photorealism.",
         "architecture": "flux",
         "fileSize": 23802932552,
         "filename": "flux1-dev.safetensors",
         "downloadUrl": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
+    },
+    {
+        "id": "cascade-stage-c",
+        "name": "Stable Cascade (Stage C)",
+        "shortName": "Cascade",
+        "description": "Würstchen architecture. Extremely fast inference with compact latent space.",
+        "architecture": "cascade",
+        "fileSize": 9156923392,
+        "filename": "stable_cascade_stage_c.safetensors",
+        "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c.safetensors",
+    },
+    {
+        "id": "hunyuan-dit",
+        "name": "HunyuanDiT v1.2",
+        "shortName": "Hunyuan",
+        "description": "Tencent's DiT model. Strong bilingual (Chinese/English) understanding.",
+        "architecture": "hunyuan",
+        "fileSize": 8238213120,
+        "filename": "hunyuan-dit-v1.2.safetensors",
+        "downloadUrl": "https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers/resolve/main/denoiser/diffusion_pytorch_model.safetensors",
+    },
+    {
+        "id": "pixart-sigma",
+        "name": "PixArt-Σ (Sigma)",
+        "shortName": "PixArt",
+        "description": "Efficient DiT architecture. Fast training and inference with strong 4K generation.",
+        "architecture": "pixart",
+        "fileSize": 2504024064,
+        "filename": "pixart-sigma-xl-2-1024.safetensors",
+        "downloadUrl": "https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS/resolve/main/diffusion_pytorch_model.safetensors",
+    },
+    {
+        "id": "kolors",
+        "name": "Kolors",
+        "shortName": "Kolors",
+        "description": "Kwai's SDXL-based model with ChatGLM text encoder. Strong Chinese cultural understanding.",
+        "architecture": "kolors",
+        "fileSize": 6938078334,
+        "filename": "kolors-diffusers.safetensors",
+        "downloadUrl": "https://huggingface.co/Kwai-Kolors/Kolors-diffusers/resolve/main/unet/diffusion_pytorch_model.safetensors",
+    },
+    {
+        "id": "auraflow",
+        "name": "AuraFlow v0.3",
+        "shortName": "AuraFlow",
+        "description": "Open-source flow-based model. Fully open weights with strong generation quality.",
+        "architecture": "auraflow",
+        "fileSize": 11483734016,
+        "filename": "auraflow-v0.3.safetensors",
+        "downloadUrl": "https://huggingface.co/fal/AuraFlow-v0.3/resolve/main/auraflow_0.3.safetensors",
     },
 ]
 
@@ -111,22 +181,45 @@ class TrainingStartRequest(PydanticBase):
     images: List[dict]  # [{filePath, captions: [...]}]
 
 # Global trainer instance
-from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset
+from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset, estimate_training_time, ARCH_VRAM_MIN
 trainer_instance = LoRATrainer()
 
 TRAINING_DATA_DIR = BACKEND_DIR / "training_data"
 OUTPUT_DIR = BACKEND_DIR / "output"
 
+ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade", "hunyuan", "pixart", "kolors", "auraflow"]
+
 @app.get("/api/gpu/info")
 async def gpu_info():
-    """Return GPU info and optimization profiles for all architectures."""
+    """Return GPU info, optimization profiles, and ETA estimates for all architectures."""
     info = get_gpu_info()
-    profiles = {
-        "sd15": get_optimization_profile(info["vram_gb"], "sd15"),
-        "sdxl": get_optimization_profile(info["vram_gb"], "sdxl"),
-        "flux": get_optimization_profile(info["vram_gb"], "flux"),
-    }
-    return {"gpu": info, "profiles": profiles}
+    profiles = {}
+    estimates = {}
+    for arch in ALL_ARCHITECTURES:
+        profiles[arch] = get_optimization_profile(info["vram_gb"], arch)
+        estimates[arch] = estimate_training_time(
+            architecture=arch, steps=1500, rank=16,
+            resolution=profiles[arch].get("recommended_resolution", 512),
+            vram_gb=info["vram_gb"], batch_size=1,
+        )
+    return {"gpu": info, "profiles": profiles, "estimates": estimates}
+
+class EstimateRequest(PydanticBase):
+    architecture: str
+    steps: int
+    rank: int = 16
+    resolution: int = 512
+    batchSize: int = 1
+
+@app.post("/api/gpu/estimate")
+async def estimate_time(req: EstimateRequest):
+    """Estimate training time for specific config."""
+    info = get_gpu_info()
+    est = estimate_training_time(
+        architecture=req.architecture, steps=req.steps, rank=req.rank,
+        resolution=req.resolution, vram_gb=info["vram_gb"], batch_size=req.batchSize,
+    )
+    return est
 
 @app.post("/api/training/start")
 async def start_training(req: TrainingStartRequest):

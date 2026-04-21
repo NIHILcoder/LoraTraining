@@ -1,11 +1,9 @@
 import React from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
 import { Sidebar } from './components/layout/Sidebar';
-import { DatasetPage } from './pages/DatasetPage';
-import { ConfigPage } from './pages/ConfigPage';
+import { TrainingWorkspacePage } from './pages/TrainingWorkspacePage';
 import { ModelsPage } from './pages/ModelsPage';
-import { TrainingPage } from './pages/TrainingPage';
 import { GalleryPage } from './pages/GalleryPage';
 import { PlaygroundPage } from './pages/PlaygroundPage';
 import { TitleBar } from './components/layout/TitleBar';
@@ -22,12 +20,13 @@ export function App() {
             <main className="app-main">
               <div className="app-content-wrapper">
                 <Routes>
-                  <Route path="/" element={<DatasetPage />} />
-                  <Route path="/config" element={<ConfigPage />} />
-                  <Route path="/models" element={<ModelsPage />} />
-                  <Route path="/training" element={<TrainingPage />} />
+                  <Route path="/" element={<TrainingWorkspacePage />} />
+                  {/* Legacy redirects */}
+                  <Route path="/config" element={<Navigate to="/" replace />} />
+                  <Route path="/training" element={<Navigate to="/" replace />} />
+                  <Route path="/models" element={<div className="page-wrapper"><ModelsPage /></div>} />
                   <Route path="/playground" element={<PlaygroundPage />} />
-                  <Route path="/gallery" element={<GalleryPage />} />
+                  <Route path="/gallery" element={<div className="page-wrapper"><GalleryPage /></div>} />
                 </Routes>
               </div>
             </main>

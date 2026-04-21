@@ -218,6 +218,22 @@ export async function fetchGpuInfo(): Promise<any> {
   return response.json();
 }
 
+export async function estimateTrainingTime(params: {
+  architecture: string;
+  steps: number;
+  rank: number;
+  resolution: number;
+  batchSize: number;
+}): Promise<{ eta_seconds: number; time_per_step: number; feasible: boolean; reason: string | null }> {
+  const response = await fetch(`${API_BASE}/gpu/estimate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(params),
+  });
+  if (!response.ok) throw new Error('Failed to estimate training time');
+  return response.json();
+}
+
 export async function stopTraining(sessionId: string): Promise<void> {
   const response = await fetch(`${API_BASE}/training/stop/${sessionId}`, {
     method: 'POST',

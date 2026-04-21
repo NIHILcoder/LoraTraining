@@ -3,7 +3,7 @@
 // ============================================
 
 // --- Base Model Types ---
-export type ModelArchitecture = 'sd15' | 'sdxl' | 'flux';
+export type ModelArchitecture = 'sd15' | 'sd21' | 'sdxl' | 'sd3' | 'flux' | 'cascade' | 'hunyuan' | 'pixart' | 'kolors' | 'auraflow';
 export type ModelDownloadStatus = 'not_downloaded' | 'downloading' | 'downloaded' | 'error' | 'verifying';
 
 export interface BaseModel {
@@ -51,8 +51,8 @@ export interface Dataset {
 // --- Training Configuration ---
 export type OptimizerType = 'AdamW' | 'Prodigy' | 'DAdaptAdam';
 export type SchedulerType = 'cosine' | 'linear' | 'constant' | 'cosine_with_restarts';
-export type ResolutionType = 512 | 768 | 1024;
-export type BaseModelType = 'sd15' | 'sdxl' | 'flux';
+export type ResolutionType = 512 | 768 | 1024 | 1536;
+export type BaseModelType = 'sd15' | 'sd21' | 'sdxl' | 'sd3' | 'flux' | 'cascade' | 'hunyuan' | 'pixart' | 'kolors' | 'auraflow';
 
 export interface TrainingConfig {
   id: string;

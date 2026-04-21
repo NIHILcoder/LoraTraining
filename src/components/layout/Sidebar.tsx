@@ -1,10 +1,8 @@
 import React from 'react';
 import { NavLink, useLocation } from 'react-router-dom';
 import {
-  Images,
-  SlidersHorizontal,
+  FlaskConical,
   HardDrive,
-  Activity,
   LayoutGrid,
   Sparkles,
   Wifi,
@@ -15,10 +13,8 @@ import { useApp } from '../../context/AppContext';
 import './Sidebar.css';
 
 const navItems = [
-  { path: '/', label: 'Dataset', icon: Images, description: 'Upload & manage' },
-  { path: '/config', label: 'Configuration', icon: SlidersHorizontal, description: 'Hyperparameters' },
+  { path: '/', label: 'Train', icon: FlaskConical, description: 'Dataset · Config · Run' },
   { path: '/models', label: 'Models Hub', icon: HardDrive, description: 'Download models' },
-  { path: '/training', label: 'Training', icon: Activity, description: 'Monitor & control' },
   { path: '/playground', label: 'Playground', icon: Zap, description: 'Test models' },
   { path: '/gallery', label: 'Gallery', icon: LayoutGrid, description: 'Saved models' },
 ];
@@ -60,7 +56,7 @@ export function Sidebar() {
                   <span className="sidebar__link-label">{item.label}</span>
                   <span className="sidebar__link-desc">{item.description}</span>
                 </div>
-                {item.path === '/training' && state.trainingStatus.phase === 'training' && (
+                {item.path === '/' && state.trainingStatus.phase === 'training' && (
                   <span className="sidebar__live-dot" />
                 )}
               </NavLink>

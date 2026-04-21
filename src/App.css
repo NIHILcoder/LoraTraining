@@ -26,6 +26,12 @@
 }
 
 .app-content-wrapper {
+  min-height: 100%;
+  height: 100%;
+}
+
+/* Wrapper for regular pages (not workspace) */
+.page-wrapper {
   max-width: 1400px;
   margin: 0 auto;
   padding: var(--space-8);
