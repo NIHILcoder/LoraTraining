@@ -283,6 +283,20 @@ async def stop_training(session_id: str):
         if task:
             task.cancel()
         del active_training_sessions[session_id]
+    # Broadcast idle state so frontend UI resets immediately
+    await broadcast_to_connections({
+        "type": "training_update",
+        "data": {"phase": "idle", "currentStep": 0, "totalSteps": 0}
+    })
+    await broadcast_to_connections({
+        "type": "training_log",
+        "data": {
+            "id": str(uuid.uuid4()),
+            "timestamp": int(time.time() * 1000),
+            "level": "warning",
+            "message": "Training stopped by user."
+        }
+    })
     return {"status": "stopped"}
 
 @app.get("/api/training/output/{session_id}")
@@ -536,6 +550,9 @@ async def run_real_training(session_id: str, session: dict, websocket: WebSocket
             }
         })
         
+    except asyncio.CancelledError:
+        # Task was cancelled via stop button — not an error
+        print("[Training] Task cancelled (stop requested).")
     except Exception as e:
         error_msg = str(e)
         print(f"[Training] Error: {error_msg}")

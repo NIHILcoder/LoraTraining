@@ -36,11 +36,16 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
 
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [isStopModalOpen, setIsStopModalOpen] = useState(false);
+  const [isStopping, setIsStopping] = useState(false);
   const logsEndRef = useRef<HTMLDivElement>(null);
+  const sessionIdRef = useRef<string | null>(null);
+  const isStoppingRef = useRef(false);
 
   const { isConnected, send } = useWebSocket({
     url: 'ws://localhost:8000/ws/training',
     onMessage: (msg) => {
+      // Use ref (not state) to avoid stale closure bug
+      if (isStoppingRef.current) return;
       switch (msg.type) {
         case 'training_update':
           dispatch({ type: 'SET_TRAINING_STATUS', payload: msg.data });
@@ -108,6 +113,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
         return;
       }
       setSessionId(res.sessionId || null);
+      sessionIdRef.current = res.sessionId || null;
       if (isConnected && res.sessionId) {
         send({ type: 'start_training', payload: { sessionId: res.sessionId } });
       }
@@ -131,13 +137,19 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   };
 
   const confirmStop = async () => {
-    if (!sessionId) return;
+    const sid = sessionIdRef.current || sessionId;
+    if (!sid) { setIsStopModalOpen(false); return; }
     try {
-      await stopTraining(sessionId);
-      dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'idle' } });
+      setIsStopping(true);
+      isStoppingRef.current = true;
+      // Reset UI immediately — don't wait for WS
+      dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'idle', currentStep: 0, totalSteps: 0, lossHistory: [], logs: [] } });
       setSessionId(null);
+      sessionIdRef.current = null;
+      setIsStopModalOpen(false);
+      await stopTraining(sid);
     } catch (err) { console.error(err); }
-    finally { setIsStopModalOpen(false); }
+    finally { setIsStopping(false); isStoppingRef.current = false; }
   };
 
   const formatTime = (seconds: number) => {
@@ -169,11 +181,12 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
                 variant={isPaused ? 'primary' : 'secondary'}
                 icon={isPaused ? <Play size={16} /> : <Pause size={16} />}
                 onClick={isPaused ? handleStart : handlePause}
+                disabled={isStopping}
               >
                 {isPaused ? 'Resume' : 'Pause'}
               </Button>
-              <Button variant="danger" icon={<Square size={16} />} onClick={handleStopClick}>
-                Stop
+              <Button variant="danger" icon={<Square size={16} />} onClick={handleStopClick} disabled={isStopping}>
+                {isStopping ? 'Stopping...' : 'Stop'}
               </Button>
             </>
           )}
