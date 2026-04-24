@@ -2,8 +2,6 @@ fastapi
 uvicorn[standard]
 websockets
 pydantic
-torch
-torchvision
 transformers
 Pillow
 aiohttp

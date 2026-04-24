@@ -106,19 +106,13 @@ cd LoraTraining
 npm install
 ```
 
-**Start the Python backend**
-
-```bash
-.\start-backend.bat
-```
-
-The script creates a virtual environment, installs all Python dependencies from `requirements.txt`, and starts the FastAPI server on `http://localhost:8000`.
-
-**Start the desktop application** *(separate terminal)*
+**Start the desktop application**
 
 ```bash
 npm run electron:dev
 ```
+
+> **Automated Setup:** Upon first launch, the application will automatically download a portable Python environment, install PyTorch with CUDA support, and set up all dependencies. You do not need to manually configure Python!
 
 <br />
 
@@ -184,7 +178,6 @@ LoraTraining/
 │   ├── requirements.txt
 │   └── output/              # Trained LoRA models (auto-indexed by Gallery)
 │
-├── start-backend.bat        # Windows: venv setup + uvicorn start
 ├── package.json
 └── webpack.config.js
 ```

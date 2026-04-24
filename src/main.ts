@@ -1,6 +1,8 @@
 import { app, BrowserWindow, ipcMain, Notification } from 'electron';
 import * as path from 'path';
 
+import { checkEnvExists, installEnvironment, startBackend, stopBackend } from './backend_manager';
+
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1280,
@@ -37,7 +39,6 @@ function createWindow() {
 
   // Taskbar Progress and Notifications
   ipcMain.on('set-progress-bar', (event, progress: number) => {
-    // progress is a number between 0 and 1, or -1 to remove
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.setProgressBar(progress);
     }
@@ -48,8 +49,36 @@ function createWindow() {
       new Notification({
         title,
         body,
-        icon: path.join(__dirname, 'icon.png') // Optional
+        icon: path.join(__dirname, 'icon.png')
       }).show();
+    }
+  });
+
+  // Backend Setup IPC
+  ipcMain.handle('check-env', () => checkEnvExists());
+
+  ipcMain.on('install-env', async (event) => {
+    try {
+      await installEnvironment(
+        (msg) => event.sender.send('install-log', msg),
+        (pct) => event.sender.send('install-progress', pct),
+        (stepName, pct) => {
+          event.sender.send('install-step', stepName);
+          event.sender.send('install-progress', pct);
+        }
+      );
+      event.sender.send('install-complete', { success: true });
+    } catch (err: any) {
+      event.sender.send('install-complete', { success: false, error: err.message });
+    }
+  });
+
+  ipcMain.on('start-backend', async (event) => {
+    try {
+      await startBackend((msg) => event.sender.send('backend-log', msg));
+      event.sender.send('backend-started', { success: true });
+    } catch (err: any) {
+      event.sender.send('backend-started', { success: false, error: err.message });
     }
   });
 }
@@ -62,8 +91,15 @@ app.whenReady().then(() => {
   });
 });
 
+app.on('will-quit', () => {
+  stopBackend();
+});
+
 app.on('window-all-closed', () => {
+  stopBackend();
   if (process.platform !== 'darwin') {
     app.quit();
   }
 });
+
+

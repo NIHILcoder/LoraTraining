@@ -23,6 +23,9 @@ backend/.pytest_cache/
 backend/.venv/
 backend/venv/
 backend/env/
+backend/uv*.zip
+backend/uv.exe
+backend/.setup_complete
 *.pyc
 *.pyo
 *.pyd

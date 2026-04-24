@@ -11,8 +11,7 @@ import { fetchGpuInfo, estimateTrainingTime } from '../../services/api';
 // Architecture display names
 const ARCH_LABELS: Record<string, string> = {
   sd15: 'SD 1.5', sd21: 'SD 2.1', sdxl: 'SDXL', sd3: 'SD3',
-  flux: 'Flux', cascade: 'Cascade', hunyuan: 'Hunyuan',
-  pixart: 'PixArt', kolors: 'Kolors', auraflow: 'AuraFlow',
+  flux: 'Flux', cascade: 'Cascade',
 };
 
 interface GpuData {

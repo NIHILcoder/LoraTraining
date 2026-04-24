@@ -71,7 +71,7 @@ MODEL_CATALOG = [
         "architecture": "sd21",
         "fileSize": 5214865152,
         "filename": "v2-1_768-ema-pruned.safetensors",
-        "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-2-1/resolve/main/v2-1_768-ema-pruned.safetensors",
+        "downloadUrl": "https://civitai.com/api/download/models/130072",
     },
     {
         "id": "sdxl10",
@@ -91,17 +91,27 @@ MODEL_CATALOG = [
         "architecture": "sd3",
         "fileSize": 4339718720,
         "filename": "sd3_medium_incl_clips_t5xxlfp8.safetensors",
-        "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-3-medium/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors",
+        "downloadUrl": "https://huggingface.co/Kijai/sd3-models/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors",
     },
     {
         "id": "flux-dev",
         "name": "Flux.1 Dev",
-        "shortName": "Flux",
+        "shortName": "Flux Dev",
         "description": "Next-gen by Black Forest Labs. Superior quality with best prompt adherence and photorealism.",
         "architecture": "flux",
         "fileSize": 23802932552,
         "filename": "flux1-dev.safetensors",
         "downloadUrl": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
+    },
+    {
+        "id": "flux-schnell",
+        "name": "Flux.1 Schnell",
+        "shortName": "Flux Schnell",
+        "description": "Next-gen by Black Forest Labs. Lightning fast generation with high prompt adherence. Free for commercial use.",
+        "architecture": "flux",
+        "fileSize": 23802932552,
+        "filename": "flux1-schnell.safetensors",
+        "downloadUrl": "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors",
     },
     {
         "id": "cascade-stage-c",
@@ -110,48 +120,18 @@ MODEL_CATALOG = [
         "description": "Würstchen architecture. Extremely fast inference with compact latent space.",
         "architecture": "cascade",
         "fileSize": 9156923392,
-        "filename": "stable_cascade_stage_c.safetensors",
-        "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c.safetensors",
+        "filename": "stage_c_bf16.safetensors",
+        "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c_bf16.safetensors",
     },
     {
-        "id": "hunyuan-dit",
-        "name": "HunyuanDiT v1.2",
-        "shortName": "Hunyuan",
-        "description": "Tencent's DiT model. Strong bilingual (Chinese/English) understanding.",
-        "architecture": "hunyuan",
-        "fileSize": 8238213120,
-        "filename": "hunyuan-dit-v1.2.safetensors",
-        "downloadUrl": "https://huggingface.co/Tencent-Hunyuan/HunyuanDiT-v1.2-Diffusers/resolve/main/denoiser/diffusion_pytorch_model.safetensors",
-    },
-    {
-        "id": "pixart-sigma",
-        "name": "PixArt-Σ (Sigma)",
-        "shortName": "PixArt",
-        "description": "Efficient DiT architecture. Fast training and inference with strong 4K generation.",
-        "architecture": "pixart",
-        "fileSize": 2504024064,
-        "filename": "pixart-sigma-xl-2-1024.safetensors",
-        "downloadUrl": "https://huggingface.co/PixArt-alpha/PixArt-Sigma-XL-2-1024-MS/resolve/main/diffusion_pytorch_model.safetensors",
-    },
-    {
-        "id": "kolors",
-        "name": "Kolors",
-        "shortName": "Kolors",
-        "description": "Kwai's SDXL-based model with ChatGLM text encoder. Strong Chinese cultural understanding.",
-        "architecture": "kolors",
-        "fileSize": 6938078334,
-        "filename": "kolors-diffusers.safetensors",
-        "downloadUrl": "https://huggingface.co/Kwai-Kolors/Kolors-diffusers/resolve/main/unet/diffusion_pytorch_model.safetensors",
-    },
-    {
-        "id": "auraflow",
-        "name": "AuraFlow v0.3",
-        "shortName": "AuraFlow",
-        "description": "Open-source flow-based model. Fully open weights with strong generation quality.",
-        "architecture": "auraflow",
-        "fileSize": 11483734016,
-        "filename": "auraflow-v0.3.safetensors",
-        "downloadUrl": "https://huggingface.co/fal/AuraFlow-v0.3/resolve/main/auraflow_0.3.safetensors",
+        "id": "stable-cascade",
+        "name": "Stable Cascade (Stage C)",
+        "shortName": "Cascade",
+        "description": "Würstchen architecture. Extremely fast inference with compact latent space.",
+        "architecture": "cascade",
+        "fileSize": 9156923392,
+        "filename": "stage_c_bf16.safetensors",
+        "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c_bf16.safetensors",
     },
 ]
 
@@ -187,7 +167,7 @@ trainer_instance = LoRATrainer()
 TRAINING_DATA_DIR = BACKEND_DIR / "training_data"
 OUTPUT_DIR = BACKEND_DIR / "output"
 
-ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade", "hunyuan", "pixart", "kolors", "auraflow"]
+ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade"]
 
 @app.get("/api/gpu/info")
 async def gpu_info():
@@ -982,9 +962,20 @@ async def set_models_directory(req: SetDirectoryRequest):
     save_settings({"modelsDirectory": str(target)})
     return {"status": "ok", "modelsDirectory": str(target)}
 
-@app.get("/api/models/directory")
-async def get_models_directory():
-    return {"modelsDirectory": str(get_models_dir())}
+@app.post("/api/settings/token")
+async def set_hf_token(req: dict):
+    save_settings({"hfToken": req.get("token", "")})
+    return {"status": "ok"}
+
+@app.get("/api/settings/token")
+async def get_hf_token():
+    settings = {}
+    if SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text())
+        except Exception:
+            pass
+    return {"token": settings.get("hfToken", "")}
 
 async def run_download(model_id: str, url: str, filename: str, models_dir: Path):
     """Download a model file with real-time progress broadcasting."""
@@ -999,12 +990,37 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
     print(f"[Download] URL: {url}")
     
     try:
-        async with aiohttp.ClientSession() as session:
-            # Hugging Face and some other hosts need follow_redirects=True (default in aiohttp)
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=None)) as response:
+        settings = {}
+        if SETTINGS_FILE.exists():
+            try:
+                settings = json.loads(SETTINGS_FILE.read_text())
+            except Exception:
+                pass
+        hf_token = settings.get("hfToken", "")
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+            "Accept": "*/*"
+        }
+        
+        # Only send token for specific gated organizations to avoid 403 on public repos
+        gated_orgs = ["black-forest-labs", "stabilityai"]
+        should_send_token = any(org in url.lower() for org in gated_orgs)
+        
+        if hf_token and "huggingface.co" in url and should_send_token:
+            headers["Authorization"] = f"Bearer {hf_token}"
+            print(f"[Download] Using HuggingFace Token for gated repo: {url}")
+
+        async with aiohttp.ClientSession(headers=headers) as session:
+            print(f"[Download] Starting request to: {url}")
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=None), allow_redirects=True) as response:
+                print(f"[Download] Response status: {response.status} for {url}")
                 if response.status != 200:
                     error_msg = f"HTTP {response.status}: {response.reason}"
-                    print(f"[Download] Error: {error_msg}")
+                    print(f"[Download] Error: {error_msg} for URL: {url}")
+                    # Special check for 401/404 on HF which might mean gated
+                    if response.status in [401, 403, 404] and "huggingface.co" in url and not hf_token:
+                        error_msg += " (Token might be required)"
+                    
                     await broadcast_to_connections({
                         "type": "download_error",
                         "data": {"modelId": model_id, "message": error_msg}
@@ -1012,6 +1028,18 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                     return
                 
                 total_size = int(response.headers.get("Content-Length", 0))
+                
+                # Integrity check: model files should be > 10MB (most are > 2GB)
+                # If it's small, it's likely an HTML error page
+                if total_size < 10 * 1024 * 1024:
+                    error_msg = "Downloaded file is too small. Possibly an invalid URL or restricted access."
+                    print(f"[Download] Error: {error_msg} (Size: {total_size} bytes)")
+                    await broadcast_to_connections({
+                        "type": "download_error",
+                        "data": {"modelId": model_id, "message": error_msg}
+                    })
+                    return
+                    
                 downloaded = 0
                 last_broadcast = 0
                 start_time = time.time()

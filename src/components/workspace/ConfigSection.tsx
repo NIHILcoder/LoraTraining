@@ -171,10 +171,6 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
                 { value: 'sd3', label: 'SD3 — 1024px' },
                 { value: 'flux', label: 'Flux.1 — 1024px' },
                 { value: 'cascade', label: 'Cascade — 1024px' },
-                { value: 'hunyuan', label: 'HunyuanDiT — 1024px' },
-                { value: 'pixart', label: 'PixArt-Σ — 1024px' },
-                { value: 'kolors', label: 'Kolors — 1024px' },
-                { value: 'auraflow', label: 'AuraFlow — 1024px' },
               ]}
               tooltip="Foundation model architecture"
               onChange={(v) => updateConfig({ baseModel: v as BaseModelType })}

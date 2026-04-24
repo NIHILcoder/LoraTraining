@@ -43,6 +43,12 @@ export function ModelsPage() {
   const [showDirEdit, setShowDirEdit] = useState(false);
   const [dirInput, setDirInput] = useState('');
   const [savingDir, setSavingDir] = useState(false);
+  
+  const [hfToken, setHfToken] = useState('');
+  const [showTokenEdit, setShowTokenEdit] = useState(false);
+  const [savingToken, setSavingToken] = useState(false);
+  const [highlightToken, setHighlightToken] = useState(false);
+  const [cancellingModels, setCancellingModels] = useState<Set<string>>(new Set());
 
   // WebSocket for download progress
   useWebSocket({
@@ -50,6 +56,7 @@ export function ModelsPage() {
     onMessage: (msg) => {
       switch (msg.type) {
         case 'download_progress':
+          if (cancellingModels.has(msg.data.modelId)) break;
           dispatch({
             type: 'UPDATE_BASE_MODEL',
             payload: {
@@ -63,6 +70,11 @@ export function ModelsPage() {
           });
           break;
         case 'download_complete':
+          setCancellingModels(prev => {
+            const next = new Set(prev);
+            next.delete(msg.data.modelId);
+            return next;
+          });
           dispatch({
             type: 'UPDATE_BASE_MODEL',
             payload: {
@@ -75,6 +87,11 @@ export function ModelsPage() {
           });
           break;
         case 'download_error':
+          setCancellingModels(prev => {
+            const next = new Set(prev);
+            next.delete(msg.data.modelId);
+            return next;
+          });
           dispatch({
             type: 'UPDATE_BASE_MODEL',
             payload: {
@@ -105,9 +122,31 @@ export function ModelsPage() {
 
   useEffect(() => {
     loadModels();
+    
+    // Fetch HF Token on mount
+    fetch('http://localhost:8000/api/settings/token')
+      .then(r => r.json())
+      .then(d => {
+        if (d.token) {
+          setHfToken(d.token);
+        }
+      })
+      .catch(console.error);
   }, [loadModels]);
 
   const handleDownload = async (modelId: string) => {
+    // Check if it's a model that likely needs a token (all high-end models on HF)
+    const gatedModels = ['flux-dev', 'flux-schnell', 'sd3-medium'];
+    const isGated = gatedModels.includes(modelId);
+    
+    if (isGated && !hfToken) {
+      window.scrollTo({ top: 0, behavior: 'smooth' });
+      setShowTokenEdit(true);
+      setHighlightToken(true);
+      setTimeout(() => setHighlightToken(false), 3000);
+      return;
+    }
+
     try {
       dispatch({
         type: 'UPDATE_BASE_MODEL',
@@ -120,14 +159,20 @@ export function ModelsPage() {
   };
 
   const handleCancelDownload = async (modelId: string) => {
+    setCancellingModels(prev => new Set(prev).add(modelId));
     try {
-      await cancelBaseModelDownload(modelId);
       dispatch({
         type: 'UPDATE_BASE_MODEL',
         payload: { id: modelId, status: 'not_downloaded', downloadProgress: undefined, downloadSpeed: undefined },
       });
+      await cancelBaseModelDownload(modelId);
     } catch (err) {
       console.error('Cancel failed:', err);
+      setCancellingModels(prev => {
+        const next = new Set(prev);
+        next.delete(modelId);
+        return next;
+      });
     }
   };
 
@@ -180,6 +225,22 @@ export function ModelsPage() {
       console.error('Set directory failed:', err);
     } finally {
       setSavingDir(false);
+    }
+  };
+
+  const handleSaveToken = async () => {
+    setSavingToken(true);
+    try {
+      await fetch('http://localhost:8000/api/settings/token', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ token: hfToken }),
+      });
+      setShowTokenEdit(false);
+    } catch (err) {
+      console.error('Failed to save token:', err);
+    } finally {
+      setSavingToken(false);
     }
   };
 
@@ -345,33 +406,91 @@ export function ModelsPage() {
           <span>{downloadedCount} model{downloadedCount !== 1 ? 's' : ''} downloaded</span>
           <Badge variant="default">{formatSize(totalDownloadedSize)}</Badge>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
-          {showDirEdit ? (
-            <div className="dir-settings">
-              <input
-                className="dir-settings__input"
-                value={dirInput}
-                onChange={(e) => setDirInput(e.target.value)}
-                placeholder="Path to models directory..."
-                onKeyDown={(e) => e.key === 'Enter' && handleSaveDir()}
-              />
-              <Button variant="primary" size="sm" loading={savingDir} onClick={handleSaveDir}>
-                Save
-              </Button>
-              <Button variant="ghost" size="sm" onClick={() => { setShowDirEdit(false); setDirInput(state.modelsDirectory); }}>
-                Cancel
-              </Button>
-            </div>
-          ) : (
-            <>
-              <span className="models-storage-path" title={state.modelsDirectory}>
-                {state.modelsDirectory}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 'var(--space-2)' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+            {showDirEdit ? (
+              <div className="dir-settings">
+                <input
+                  className="dir-settings__input"
+                  value={dirInput}
+                  onChange={(e) => setDirInput(e.target.value)}
+                  placeholder="Path to models directory..."
+                  onKeyDown={(e) => e.key === 'Enter' && handleSaveDir()}
+                />
+                <Button variant="primary" size="sm" loading={savingDir} onClick={handleSaveDir}>
+                  Save
+                </Button>
+                <Button variant="ghost" size="sm" onClick={() => { setShowDirEdit(false); setDirInput(state.modelsDirectory); }}>
+                  Cancel
+                </Button>
+              </div>
+            ) : (
+              <>
+                <span className="models-storage-path" title={state.modelsDirectory}>
+                  {state.modelsDirectory}
+                </span>
+                <Button variant="ghost" size="sm" icon={<FolderOpen size={14} />} onClick={() => setShowDirEdit(true)}>
+                  Change
+                </Button>
+              </>
+            )}
+          </div>
+          
+          {/* HuggingFace Token Input */}
+          <div 
+            style={{ 
+              display: 'flex', 
+              flexDirection: 'column',
+              gap: 'var(--space-2)',
+              padding: showTokenEdit || highlightToken ? 'var(--space-3)' : '0',
+              background: highlightToken ? 'var(--bg-surface-hover)' : 'transparent',
+              border: highlightToken ? '1px solid var(--primary)' : '1px solid transparent',
+              borderRadius: 'var(--radius-md)',
+              transition: 'all 0.3s ease',
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+              <span style={{ fontSize: 'var(--font-sm)', color: highlightToken ? 'var(--primary)' : 'var(--text-muted)', fontWeight: highlightToken ? 600 : 400 }}>
+                HuggingFace Token:
               </span>
-              <Button variant="ghost" size="sm" icon={<FolderOpen size={14} />} onClick={() => setShowDirEdit(true)}>
-                Change
-              </Button>
-            </>
-          )}
+              {showTokenEdit ? (
+                <div className="dir-settings">
+                  <input
+                    type="password"
+                    className="dir-settings__input"
+                    value={hfToken}
+                    onChange={(e) => setHfToken(e.target.value)}
+                    placeholder="hf_..."
+                    onKeyDown={(e) => e.key === 'Enter' && handleSaveToken()}
+                    autoFocus={highlightToken}
+                  />
+                  <Button variant="primary" size="sm" loading={savingToken} onClick={handleSaveToken}>
+                    Save
+                  </Button>
+                  <Button variant="ghost" size="sm" onClick={() => setShowTokenEdit(false)}>
+                    Cancel
+                  </Button>
+                </div>
+              ) : (
+                <>
+                  <span className="models-storage-path" style={{ opacity: 0.7 }}>
+                    {hfToken ? '•'.repeat(Math.min(hfToken.length, 12)) : 'Not set (Required for Flux & SD3)'}
+                  </span>
+                  <Button variant="ghost" size="sm" onClick={() => setShowTokenEdit(true)}>
+                    Edit
+                  </Button>
+                </>
+              )}
+            </div>
+            {showTokenEdit && !hfToken && (
+              <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
+                <span style={{ color: 'var(--text-warning)' }}>⚠️ Token is required to download this model.</span>
+                <span><strong>Step 1:</strong> Go to <a href="#" onClick={(e) => { e.preventDefault(); window.require('electron').shell.openExternal('https://huggingface.co/settings/tokens') }} style={{ color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer' }}>HuggingFace Tokens page</a>.</span>
+                <span><strong>Step 2:</strong> Click "Create new token" (select "Read" permission).</span>
+                <span><strong>Step 3:</strong> Copy the generated token starting with <code>hf_...</code> and paste it here.</span>
+              </div>
+            )}
+          </div>
         </div>
       </Card>
 
@@ -425,7 +544,7 @@ export function ModelsPage() {
                 placeholder="My Custom Model"
               />
             </div>
-            <div className="custom-model-form__field custom-model-form__field--small">
+            <div className="custom-model-form__field" style={{ maxWidth: 120 }}>
               <label className="custom-model-form__label">Architecture</label>
               <select
                 className="custom-model-form__select"
@@ -434,21 +553,13 @@ export function ModelsPage() {
               >
                 <option value="sd15">SD 1.5</option>
                 <option value="sdxl">SDXL</option>
-                <option value="flux">Flux</option>
+                <option value="flux">FLUX</option>
               </select>
             </div>
           </div>
-          <div style={{ display: 'flex', justifyContent: 'flex-end', gap: 'var(--space-3)', marginTop: 'var(--space-2)' }}>
-            <Button variant="secondary" onClick={() => setShowCustomForm(false)}>
-              Cancel
-            </Button>
-            <Button
-              variant="primary"
-              icon={<Plus size={14} />}
-              loading={addingCustom}
-              onClick={handleAddCustom}
-              disabled={!customUrl.trim()}
-            >
+          <div className="custom-model-form__actions">
+            <Button variant="ghost" onClick={() => setShowCustomForm(false)}>Cancel</Button>
+            <Button variant="primary" onClick={handleAddCustom} loading={addingCustom} disabled={!customUrl.trim()}>
               Add Model
             </Button>
           </div>
