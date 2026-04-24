@@ -60,7 +60,10 @@ function createWindow() {
   ipcMain.on('install-env', async (event) => {
     try {
       await installEnvironment(
-        (msg) => event.sender.send('install-log', msg),
+        (msg) => {
+          console.log(`[Install] ${msg}`);
+          event.sender.send('install-log', msg);
+        },
         (pct) => event.sender.send('install-progress', pct),
         (stepName, pct) => {
           event.sender.send('install-step', stepName);
@@ -69,15 +72,20 @@ function createWindow() {
       );
       event.sender.send('install-complete', { success: true });
     } catch (err: any) {
+      console.error(`[Install Error] ${err.message}`);
       event.sender.send('install-complete', { success: false, error: err.message });
     }
   });
 
   ipcMain.on('start-backend', async (event) => {
     try {
-      await startBackend((msg) => event.sender.send('backend-log', msg));
+      await startBackend((msg) => {
+        console.log(`[Backend] ${msg}`);
+        event.sender.send('backend-log', msg);
+      });
       event.sender.send('backend-started', { success: true });
     } catch (err: any) {
+      console.error(`[Backend Error] ${err.message}`);
       event.sender.send('backend-started', { success: false, error: err.message });
     }
   });

@@ -8,6 +8,8 @@ import {
   Clock,
   Zap,
   Rocket,
+  Copy,
+  Check,
 } from 'lucide-react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
@@ -40,6 +42,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   const logsEndRef = useRef<HTMLDivElement>(null);
   const sessionIdRef = useRef<string | null>(null);
   const isStoppingRef = useRef(false);
+  const [copied, setCopied] = useState(false);
 
   const { isConnected, send } = useWebSocket({
     url: 'ws://localhost:8000/ws/training',
@@ -150,6 +153,30 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
       await stopTraining(sid);
     } catch (err) { console.error(err); }
     finally { setIsStopping(false); isStoppingRef.current = false; }
+  };
+
+  const handleCopyLogs = () => {
+    const logText = status.logs.map(log => {
+      const time = new Date(log.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
+      return `[${time}] ${log.message}`;
+    }).join('\n');
+    
+    try {
+      const electron = (window as any).require?.('electron');
+      if (electron?.clipboard) {
+        electron.clipboard.writeText(logText);
+        setCopied(true);
+        setTimeout(() => setCopied(false), 2000);
+        return;
+      }
+    } catch (e) { /* fallback to navigator */ }
+
+    navigator.clipboard.writeText(logText).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(err => {
+      console.error('Failed to copy logs:', err);
+    });
   };
 
   const formatTime = (seconds: number) => {
@@ -291,9 +318,33 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
           {/* Logs */}
           <div className="monitor__logs">
             <Card className="logs-card" padding="none">
-              <div className="logs-header">
-                <Terminal size={16} />
-                <span>Training Logs</span>
+              <div className="logs-header" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 'var(--space-2)' }}>
+                  <Terminal size={16} />
+                  <span>Training Logs</span>
+                </div>
+                {status.logs.length > 0 && (
+                  <button 
+                    onClick={handleCopyLogs}
+                    style={{ 
+                      background: 'none', 
+                      border: 'none', 
+                      color: copied ? 'var(--color-success)' : 'var(--color-text-tertiary)',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '4px',
+                      fontSize: '11px',
+                      padding: '2px 6px',
+                      borderRadius: '4px',
+                      transition: 'all 0.2s'
+                    }}
+                    title="Copy logs to clipboard"
+                  >
+                    {copied ? <Check size={12} /> : <Copy size={12} />}
+                    {copied ? 'Copied!' : 'Copy Logs'}
+                  </button>
+                )}
               </div>
               <div className="logs-content">
                 {status.logs.length === 0 ? (

@@ -11,6 +11,10 @@ from fastapi import FastAPI, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBase
 
+# Windows stability fixes
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["PYTHONUNBUFFERED"] = "1"
+
 app = FastAPI()
 
 app.add_middleware(
@@ -751,8 +755,10 @@ async def run_real_training(session_id: str, session: dict, websocket: WebSocket
         # Task was cancelled via stop button — not an error
         print("[Training] Task cancelled (stop requested).")
     except Exception as e:
-        error_msg = str(e)
-        print(f"[Training] Error: {error_msg}")
+        import traceback
+        tb_str = traceback.format_exc()
+        error_msg = f"{str(e)}\n\nTraceback:\n{tb_str}"
+        print(f"[Training] Error:\n{error_msg}")
         await broadcast_to_connections({
             "type": "training_update",
             "data": {"phase": "error"}

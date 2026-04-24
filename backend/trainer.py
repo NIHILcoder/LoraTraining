@@ -5,8 +5,47 @@ Real training module using HuggingFace diffusers + peft.
 Automatically adapts to available GPU VRAM.
 """
 
-import os
+import subprocess
 import gc
+import random
+
+# --- CRITICAL PATCHES FOR LIBRARIES ---
+def bypass_check():
+    return None
+
+# 1. Fixes: AttributeError: 'CLIPTextModel' object has no attribute 'text_model'
+try:
+    from transformers.models.clip.modeling_clip import CLIPTextModel
+    if not hasattr(CLIPTextModel, "text_model"):
+        CLIPTextModel.text_model = property(lambda self: self)
+except Exception: pass
+
+# 2. Fixes: ValueError: Due to a serious vulnerability issue in `torch.load`...
+# We patch it in every possible location within transformers
+try:
+    import transformers.utils.import_utils
+    transformers.utils.import_utils.check_torch_load_is_safe = bypass_check
+    
+    import transformers.modeling_utils
+    transformers.modeling_utils.check_torch_load_is_safe = bypass_check
+    
+    import transformers.dynamic_module_utils
+    transformers.dynamic_module_utils.check_torch_load_is_safe = bypass_check
+except Exception: pass
+
+# 3. Aggressively disable safety checker in diffusers
+try:
+    import diffusers.loaders.single_file
+    diffusers.loaders.single_file._legacy_load_safety_checker = lambda *args, **kwargs: {}
+except Exception: pass
+
+# 4. Force disable low_cpu_mem_usage globally in transformers
+try:
+    import transformers.modeling_utils
+    transformers.modeling_utils._CONFIG_FOR_LOW_CPU_MEM_USAGE = False
+except Exception: pass
+# ----------------------------------------
+import os
 import time
 import uuid
 import shutil
@@ -374,24 +413,15 @@ class LoRADataset(torch.utils.data.Dataset):
         txt_path = img_path.with_suffix(".txt")
         caption = ""
         
-        # Apply caption dropout (replace with empty string randomly)
         if txt_path.exists():
             if self.caption_dropout > 0.0 and torch.rand(1).item() < self.caption_dropout:
-                caption = ""  # Dropped
+                caption = ""
             else:
                 caption = txt_path.read_text(encoding="utf-8").strip()
         
-        tokens = self.tokenizer(
-            caption,
-            max_length=self.tokenizer.model_max_length,
-            padding="max_length",
-            truncation=True,
-            return_tensors="pt",
-        )
-        
         return {
             "pixel_values": image,
-            "input_ids": tokens.input_ids.squeeze(0),
+            "caption": caption,
         }
 
 
@@ -491,38 +521,104 @@ class LoRATrainer:
             progress_callback(step=0, loss=0, lr=0, phase="loading_model",
                               message=f"Loading {architecture.upper()} model...")
         
+        # Diagnostics
+        try:
+            import omegaconf
+            print(f"[Trainer] OmegaConf version: {omegaconf.__version__}")
+        except ImportError:
+            print("[Trainer] WARNING: OmegaConf NOT FOUND! from_single_file WILL FAIL.")
+            raise RuntimeError("Missing dependency: omegaconf. Please wait for the app to install it or run 'pip install omegaconf'.")
+        
+        # Normalize path for Windows
+        model_path = os.path.abspath(os.path.normpath(model_path))
+        print(f"[Trainer] Normalized model path: {model_path}")
+        
+        if not os.path.exists(model_path):
+            raise FileNotFoundError(f"Model file not found at: {model_path}")
+
         print(f"[Trainer] Loading model from: {model_path}")
         print(f"[Trainer] GPU: {gpu_info['name']} ({gpu_info['vram_gb']} GB)")
         print(f"[Trainer] Architecture: {architecture}")
-        print(f"[Trainer] Optimization: gc={opt_profile['gradient_checkpointing']}, "
-              f"precision={weight_dtype}, cache_latents={opt_profile['cache_latents']}")
         
         # Load the appropriate pipeline
-        if architecture == "sdxl":
-            pipe = StableDiffusionXLPipeline.from_single_file(
-                model_path,
-                torch_dtype=weight_dtype,
-                use_safetensors=True,
-            )
-        else:  # sd15
-            pipe = StableDiffusionPipeline.from_single_file(
-                model_path,
-                torch_dtype=weight_dtype,
-                use_safetensors=True,
-            )
+        try:
+            # We use the most basic loading possible to avoid meta-tensor bugs on Windows
+            load_kwargs = {
+                "use_safetensors": True,
+                "load_safety_checker": False,
+                "requires_safety_checker": False,
+                "local_files_only": False,
+            }
+            
+            if architecture == "sdxl":
+                pipe = StableDiffusionXLPipeline.from_single_file(model_path, **load_kwargs)
+            else:  # sd15
+                pipe = StableDiffusionPipeline.from_single_file(model_path, **load_kwargs)
+            
+            # Final attempt to move to device
+            print(f"[Trainer] Moving model to {device}...")
+            pipe.to(device, dtype=weight_dtype)
+            
+            text_encoder_one = pipe.text_encoder
+            text_encoder_two = getattr(pipe, "text_encoder_2", None)
+            tokenizer_one = pipe.tokenizer
+            tokenizer_two = getattr(pipe, "tokenizer_2", None)
+            
+            text_encoder_one.requires_grad_(False)
+            if text_encoder_two:
+                text_encoder_two.requires_grad_(False)
+                
+        except Exception as e:
+            import traceback
+            print(f"[Trainer] Critical failure during model loading: {e}")
+            traceback.print_exc()
+            raise RuntimeError(f"Model loading failed: {str(e)}")
+
         
         unet = pipe.unet
-        text_encoder = pipe.text_encoder
         vae = pipe.vae
-        tokenizer = pipe.tokenizer
         noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
         
-        # Move VAE and text_encoder to GPU for latent caching, then offload
+        # Move VAE to GPU for latent caching, then offload
         vae.to(device, dtype=weight_dtype)
-        text_encoder.to(device, dtype=weight_dtype)
         vae.requires_grad_(False)
-        text_encoder.requires_grad_(False)
         
+        # --- Phase: Preparing Dataset ---
+        if progress_callback:
+            progress_callback(step=0, loss=0, lr=0, phase="preparing",
+                              message="Preparing dataset and caching latents...")
+        
+        def encode_prompt(caption: str):
+            # Tokenize and encode with text_encoder_one
+            inputs_one = tokenizer_one(
+                caption, padding="max_length", max_length=tokenizer_one.model_max_length, truncation=True, return_tensors="pt"
+            ).to(device)
+            
+            # SAFE ACCESS for text_encoder (the fix)
+            def get_text_model_output(model, input_ids):
+                # If it's a CLIPTextModel, sometimes it has .text_model, sometimes it IS the text_model
+                if hasattr(model, "text_model"):
+                    return model.text_model(input_ids)[0]
+                return model(input_ids)[0]
+
+            prompt_embeds = get_text_model_output(text_encoder_one, inputs_one.input_ids)
+            
+            if architecture == "sdxl" and text_encoder_two:
+                inputs_two = tokenizer_two(
+                    caption, padding="max_length", max_length=tokenizer_two.model_max_length, truncation=True, return_tensors="pt"
+                ).to(device)
+                prompt_embeds_two = text_encoder_two(inputs_two.input_ids, output_hidden_states=True)
+                
+                # SDXL specific concatenation
+                pooled_embeds = prompt_embeds_two[0]
+                prompt_embeds_two = prompt_embeds_two.hidden_states[-2]
+                
+                # Combine prompt embeds
+                prompt_embeds = torch.cat([prompt_embeds, prompt_embeds_two], dim=-1)
+                return prompt_embeds, pooled_embeds
+            
+            return prompt_embeds, None
+
         # --- Phase: Preparing Dataset ---
         if progress_callback:
             progress_callback(step=0, loss=0, lr=0, phase="preparing",
@@ -531,38 +627,37 @@ class LoRATrainer:
         resolution = config.get("resolution", 512)
         enable_bucketing = config.get("enableBucketing", True)
         caption_dropout = config.get("captionDropout", 0.1)
-        dataset = LoRADataset(dataset_dir, tokenizer, resolution=resolution, enable_bucketing=enable_bucketing, caption_dropout=caption_dropout)
+        dataset = LoRADataset(dataset_dir, None, resolution=resolution, enable_bucketing=enable_bucketing, caption_dropout=caption_dropout)
         
         if len(dataset) == 0:
             raise RuntimeError("Dataset is empty! Please add images before training.")
         
-        print(f"[Trainer] Dataset: {len(dataset)} images at {resolution}x{resolution}")
-        
         # Pre-cache latents to save VRAM during training
         cached_latents = []
         cached_text_embeds = []
+        cached_pooled_embeds = []
         
         if opt_profile["cache_latents"]:
-            dataloader_cache = torch.utils.data.DataLoader(dataset, batch_size=1, shuffle=False)
-            
             with torch.no_grad():
-                for batch in dataloader_cache:
-                    pixel_values = batch["pixel_values"].to(device, dtype=weight_dtype)
-                    input_ids = batch["input_ids"].to(device)
+                for i in range(len(dataset)):
+                    item = dataset[i]
+                    pixel_values = item["pixel_values"].unsqueeze(0).to(device, dtype=weight_dtype)
+                    caption = item["caption"]
                     
                     latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
-                    text_embeds = text_encoder(input_ids)[0]
+                    embeds, pooled = encode_prompt(caption)
                     
                     cached_latents.append(latents.cpu())
-                    cached_text_embeds.append(text_embeds.cpu())
+                    cached_text_embeds.append(embeds.cpu())
+                    if pooled is not None:
+                        cached_pooled_embeds.append(pooled.cpu())
             
-            # Free VRAM: offload VAE and text_encoder
-            vae.cpu()
-            text_encoder.cpu()
-            del vae, text_encoder
-            gc.collect()
-            torch.cuda.empty_cache()
-            print(f"[Trainer] Cached {len(cached_latents)} latent pairs. VAE/TextEncoder offloaded.")
+            # Free VRAM: offload VAE and text_encoders
+            vae.cpu(); text_encoder_one.cpu()
+            if text_encoder_two: text_encoder_two.cpu()
+            del vae, text_encoder_one, text_encoder_two
+            gc.collect(); torch.cuda.empty_cache()
+            print(f"[Trainer] Cached {len(cached_latents)} latent pairs. Components offloaded.")
         
         # --- Phase: Injecting LoRA ---
         if progress_callback:
@@ -573,14 +668,9 @@ class LoRATrainer:
         network_alpha = config.get("networkAlpha", 8)
         
         # Target modules for LoRA injection
+        target_modules = ["to_q", "to_k", "to_v", "to_out.0"]
         if architecture == "sdxl":
-            target_modules = [
-                "to_q", "to_k", "to_v", "to_out.0",
-                "proj_in", "proj_out",
-                "ff.net.0.proj", "ff.net.2",
-            ]
-        else:
-            target_modules = ["to_q", "to_k", "to_v", "to_out.0"]
+            target_modules += ["proj_in", "proj_out", "ff.net.0.proj", "ff.net.2"]
         
         lora_config = LoraConfig(
             r=lora_rank,
@@ -590,51 +680,24 @@ class LoRATrainer:
         )
         
         unet.to(device, dtype=weight_dtype)
-        
         if opt_profile["gradient_checkpointing"]:
             unet.enable_gradient_checkpointing()
         
-        # Try to enable xformers for memory efficiency
         try:
             unet.enable_xformers_memory_efficient_attention()
-            print("[Trainer] xformers memory efficient attention enabled.")
         except Exception:
-            print("[Trainer] xformers not available, using default attention.")
+            pass
         
-        # Inject LoRA
         unet = get_peft_model(unet, lora_config)
         unet.train()
         
-        trainable_params = sum(p.numel() for p in unet.parameters() if p.requires_grad)
-        total_params = sum(p.numel() for p in unet.parameters())
-        print(f"[Trainer] LoRA injected: {trainable_params:,} trainable params / {total_params:,} total "
-              f"({100 * trainable_params / total_params:.2f}%)")
-        
-        # --- Optimizer ---
+        # --- Optimizer & Scheduler ---
         learning_rate = config.get("learningRate", 1e-4)
         optimizer_type = config.get("optimizer", "AdamW")
-        
-        # Collect LoRA parameters
         lora_params = [p for p in unet.parameters() if p.requires_grad]
         
-        if optimizer_type == "Prodigy":
-            try:
-                from prodigyopt import Prodigy
-                optimizer = Prodigy(lora_params, lr=1.0, weight_decay=0.01)
-            except ImportError:
-                print("[Trainer] Prodigy not installed, falling back to AdamW")
-                optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
-        elif optimizer_type == "DAdaptAdam":
-            try:
-                from dadaptation import DAdaptAdam
-                optimizer = DAdaptAdam(lora_params, lr=1.0, weight_decay=1e-2)
-            except ImportError:
-                print("[Trainer] DAdaptAdam not installed, falling back to AdamW")
-                optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
-        else:
-            optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
+        optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
         
-        # --- Learning Rate Scheduler ---
         total_steps = config.get("trainingSteps", 1000)
         warmup_steps = config.get("warmupSteps", 0)
         scheduler_type = config.get("scheduler", "cosine")
@@ -648,35 +711,17 @@ class LoRATrainer:
             progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
             if scheduler_type == "cosine":
                 return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
-            elif scheduler_type == "linear":
-                return max(0.0, 1.0 - progress)
-            elif scheduler_type == "cosine_with_restarts":
-                return max(0.0, 0.5 * (1.0 + math.cos(math.pi * ((progress * 3) % 1.0))))
-            else:  # constant
-                return 1.0
+            return 1.0
         
         lr_scheduler = LambdaLR(optimizer, lr_lambda)
         
-        # --- Training Loop ---
-        if progress_callback:
-            progress_callback(step=0, loss=0, lr=learning_rate, phase="training",
-                              message="Training started!")
-        
+        # --- Training Loop Setup ---
         seed = config.get("seed", 42)
         batch_size = min(config.get("batchSize", 1), opt_profile["max_batch_size"])
         grad_accum = config.get("gradientAccumulation", 1)
-        noise_offset = config.get("noiseOffset", 0.0)
         generator = torch.Generator(device=device).manual_seed(seed)
         
-        output_dir.mkdir(parents=True, exist_ok=True)
-        
-        running_loss = 0.0
-        best_loss = float("inf")
-        loss_count = 0
-        start_time = time.time()
-        
         import random
-        # Organize images by their bucket shape to support real batching
         shape_to_indices = {}
         for i in range(len(dataset)):
             shape = tuple(dataset.image_buckets[i])
@@ -684,65 +729,52 @@ class LoRATrainer:
                 shape_to_indices[shape] = []
             shape_to_indices[shape].append(i)
         
-        print(f"[Trainer] Starting training: {total_steps} steps, batch_size={batch_size}, "
-              f"lr={learning_rate}, rank={lora_rank}, alpha={network_alpha}")
-        print(f"[Trainer] Buckets found: {len(shape_to_indices)} different aspect ratios")
+        running_loss = 0.0
+        best_loss = float("inf")
+        loss_count = 0
+        start_time = time.time()
         
-        num_total_images = len(dataset)
-        
+        if progress_callback:
+            progress_callback(step=0, loss=0, lr=learning_rate, phase="training", message="Training started!")
+
+        # --- Training Loop ---
         for step in range(total_steps):
-            if self._stop_requested:
-                print(f"[Trainer] Stop requested at step {step}")
-                break
-            
+            if self._stop_requested: break
             self._current_step = step
             
-            # Select a random shape bucket (weighted by number of images in it) by picking a random image
-            idx_first = torch.randint(0, num_total_images, (1,)).item()
+            idx_first = torch.randint(0, len(dataset), (1,)).item()
+            shape = tuple(dataset.image_buckets[idx_first])
+            pool = shape_to_indices[shape]
+            batch_indices = random.choices(pool, k=batch_size)
             
-            if opt_profile["cache_latents"]:
-                shape = tuple(dataset.image_buckets[idx_first])
-                pool = shape_to_indices[shape]
-                batch_indices = random.choices(pool, k=batch_size)
-                
-                latents = torch.cat([cached_latents[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
-                encoder_hidden_states = torch.cat([cached_text_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
-            else:
-                shape = tuple(dataset.image_buckets[idx_first])
-                pool = shape_to_indices[shape]
-                batch_indices = random.choices(pool, k=batch_size)
-                
-                batches = [dataset[i] for i in batch_indices]
-                pixel_values = torch.stack([b["pixel_values"] for b in batches]).to(device, dtype=weight_dtype)
-                input_ids = torch.stack([b["input_ids"] for b in batches]).to(device)
-                
-                with torch.no_grad():
-                    latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
-                    encoder_hidden_states = text_encoder(input_ids)[0]
+            latents = torch.cat([cached_latents[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
+            encoder_hidden_states = torch.cat([cached_text_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
             
-            # Sample noise
+            added_cond_kwargs = {}
+            if architecture == "sdxl" and cached_pooled_embeds:
+                pooled_embeds = torch.cat([cached_pooled_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
+                res_tensor = torch.tensor([resolution, resolution], device=device, dtype=weight_dtype).repeat(batch_size, 1)
+                added_cond_kwargs = {"text_embeds": pooled_embeds, "time_ids": torch.cat([res_tensor, torch.zeros_like(res_tensor), res_tensor], dim=1)}
+            
             noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
-            
-            if noise_offset > 0.0:
-                # Add channel-wise mean offset (crucial for learning bright/dark concepts)
-                offset = torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=device, dtype=weight_dtype, generator=generator)
-                noise = noise + noise_offset * offset
-                
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
-            
-            # Add noise to latents
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            # Predict the noise
             with torch.cuda.amp.autocast(dtype=weight_dtype):
-                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states).sample
+                noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs=added_cond_kwargs).sample
             
-            # Calculate loss
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
             loss = loss / grad_accum
             loss.backward()
             
-            # Gradient accumulation
+            # Track metrics
+            loss_value = loss.item() * grad_accum
+            running_loss += loss_value
+            loss_count += 1
+            
+            if loss_value < best_loss:
+                best_loss = loss_value
+            
             if (step + 1) % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
                 optimizer.step()

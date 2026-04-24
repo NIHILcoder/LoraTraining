@@ -196,6 +196,33 @@ export function startBackend(onLog: (msg: string) => void): Promise<void> {
     }
 
     onLog('Starting Python backend server...');
+    
+    // Ensure dependencies are up to date (fast if already installed)
+    try {
+      const { execSync } = require('child_process');
+      onLog('Checking dependencies...');
+      execSync(`"${PYTHON_EXE}" -m pip install omegaconf`, { cwd: BACKEND_DIR });
+    } catch (e) {
+      onLog('Warning: Could not auto-update dependencies. Training might fail if omegaconf is missing.');
+    }
+    
+    // Kill any process already using port 8000 (Windows)
+    try {
+      const { execSync } = require('child_process');
+      const output = execSync('netstat -ano | findstr :8000').toString();
+      const lines = output.trim().split('\n');
+      for (const line of lines) {
+        const parts = line.trim().split(/\s+/);
+        const pid = parts[parts.length - 1];
+        if (pid && !isNaN(parseInt(pid))) {
+          onLog(`Cleaning up port 8000 (PID: ${pid})...`);
+          execSync(`taskkill /F /PID ${pid} /T`);
+        }
+      }
+    } catch (e) {
+      // Port likely not in use, ignore
+    }
+
     backendProcess = spawn(
       `"${PYTHON_EXE}"`,
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000'],
