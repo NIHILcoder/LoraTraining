@@ -213,7 +213,7 @@ LoraTraining/
 
 - [ ] Aspect ratio bucketing (multi-resolution dataset support)
 - [ ] Caption dropout for improved LoRA generalization
-- [ ] Noise offset training parameter
+- [X] Noise offset training parameter
 - [ ] DoRA and LyCORIS training methods
 - [ ] Img2Img in Playground
 - [ ] LoRA strength grid testing (XYZ plot)
