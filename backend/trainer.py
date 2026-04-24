@@ -291,46 +291,96 @@ def prepare_dataset(
 # Custom Dataset for Training
 # ============================================
 
-class LoRADataset(torch.utils.data.Dataset):
-    """Simple image+caption dataset for LoRA training."""
+def get_bucket(w: int, h: int, resolution: int, step: int = 64):
+    """Calculate the closest bucket dimensions for a given aspect ratio and target resolution area."""
+    import math
+    target_area = resolution * resolution
+    aspect_ratio = w / h
     
-    def __init__(self, data_dir: Path, tokenizer, resolution: int = 512, center_crop: bool = True):
-        from torchvision import transforms
-        
+    target_w = math.sqrt(target_area * aspect_ratio)
+    target_h = math.sqrt(target_area / aspect_ratio)
+    
+    # round to nearest step
+    target_w = round(target_w / step) * step
+    target_h = round(target_h / step) * step
+    
+    # ensure it's not 0
+    target_w = max(step, int(target_w))
+    target_h = max(step, int(target_h))
+    
+    return target_w, target_h
+
+class LoRADataset(torch.utils.data.Dataset):
+    """Image+caption dataset with Aspect Ratio Bucketing support."""
+    
+    def __init__(self, data_dir: Path, tokenizer, resolution: int = 512, center_crop: bool = True, enable_bucketing: bool = True, caption_dropout: float = 0.0):
         self.data_dir = data_dir
         self.tokenizer = tokenizer
         self.resolution = resolution
+        self.center_crop = center_crop
+        self.enable_bucketing = enable_bucketing
+        self.caption_dropout = caption_dropout
         
-        # Find all image/caption pairs
         self.image_files = sorted(list(data_dir.glob("*.png")))
+        self.image_buckets = []
         
-        self.transform = transforms.Compose([
-            transforms.Resize(resolution, interpolation=transforms.InterpolationMode.BILINEAR),
-            transforms.CenterCrop(resolution) if center_crop else transforms.RandomCrop(resolution),
-            transforms.RandomHorizontalFlip(),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
+        from PIL import Image
+        for img_path in self.image_files:
+            if enable_bucketing:
+                try:
+                    with Image.open(img_path) as img:
+                        w, h = img.size
+                        self.image_buckets.append(get_bucket(w, h, resolution))
+                except Exception:
+                    self.image_buckets.append((resolution, resolution))
+            else:
+                self.image_buckets.append((resolution, resolution))
     
     def __len__(self):
         return len(self.image_files)
     
     def __getitem__(self, idx):
         from PIL import Image
+        import torchvision.transforms.functional as F
         
         img_path = self.image_files[idx]
-        txt_path = img_path.with_suffix(".txt")
+        target_w, target_h = self.image_buckets[idx]
         
-        # Load image
         image = Image.open(img_path).convert("RGB")
-        image = self.transform(image)
         
-        # Load caption
+        # Resize to fit bucket while preserving aspect ratio
+        ratio = max(target_w / image.width, target_h / image.height)
+        new_w = int(image.width * ratio)
+        new_h = int(image.height * ratio)
+        
+        image = image.resize((new_w, new_h), Image.Resampling.BILINEAR)
+        
+        # Crop exactly to bucket size
+        if self.center_crop:
+            left = (new_w - target_w) // 2
+            top = (new_h - target_h) // 2
+        else:
+            left = torch.randint(0, new_w - target_w + 1, (1,)).item() if new_w > target_w else 0
+            top = torch.randint(0, new_h - target_h + 1, (1,)).item() if new_h > target_h else 0
+            
+        image = image.crop((left, top, left + target_w, top + target_h))
+        
+        image = F.to_tensor(image)
+        image = F.normalize(image, [0.5], [0.5])
+        
+        if torch.rand(1) < 0.5:
+            image = F.hflip(image)
+        
+        txt_path = img_path.with_suffix(".txt")
         caption = ""
-        if txt_path.exists():
-            caption = txt_path.read_text(encoding="utf-8").strip()
         
-        # Tokenize caption
+        # Apply caption dropout (replace with empty string randomly)
+        if txt_path.exists():
+            if self.caption_dropout > 0.0 and torch.rand(1).item() < self.caption_dropout:
+                caption = ""  # Dropped
+            else:
+                caption = txt_path.read_text(encoding="utf-8").strip()
+        
         tokens = self.tokenizer(
             caption,
             max_length=self.tokenizer.model_max_length,
@@ -479,7 +529,9 @@ class LoRATrainer:
                               message="Preparing dataset and caching latents...")
         
         resolution = config.get("resolution", 512)
-        dataset = LoRADataset(dataset_dir, tokenizer, resolution=resolution)
+        enable_bucketing = config.get("enableBucketing", True)
+        caption_dropout = config.get("captionDropout", 0.1)
+        dataset = LoRADataset(dataset_dir, tokenizer, resolution=resolution, enable_bucketing=enable_bucketing, caption_dropout=caption_dropout)
         
         if len(dataset) == 0:
             raise RuntimeError("Dataset is empty! Please add images before training.")
@@ -613,6 +665,7 @@ class LoRATrainer:
         seed = config.get("seed", 42)
         batch_size = min(config.get("batchSize", 1), opt_profile["max_batch_size"])
         grad_accum = config.get("gradientAccumulation", 1)
+        noise_offset = config.get("noiseOffset", 0.0)
         generator = torch.Generator(device=device).manual_seed(seed)
         
         output_dir.mkdir(parents=True, exist_ok=True)
@@ -622,8 +675,20 @@ class LoRATrainer:
         loss_count = 0
         start_time = time.time()
         
+        import random
+        # Organize images by their bucket shape to support real batching
+        shape_to_indices = {}
+        for i in range(len(dataset)):
+            shape = tuple(dataset.image_buckets[i])
+            if shape not in shape_to_indices:
+                shape_to_indices[shape] = []
+            shape_to_indices[shape].append(i)
+        
         print(f"[Trainer] Starting training: {total_steps} steps, batch_size={batch_size}, "
               f"lr={learning_rate}, rank={lora_rank}, alpha={network_alpha}")
+        print(f"[Trainer] Buckets found: {len(shape_to_indices)} different aspect ratios")
+        
+        num_total_images = len(dataset)
         
         for step in range(total_steps):
             if self._stop_requested:
@@ -632,16 +697,24 @@ class LoRATrainer:
             
             self._current_step = step
             
-            # Get a random training sample
+            # Select a random shape bucket (weighted by number of images in it) by picking a random image
+            idx_first = torch.randint(0, num_total_images, (1,)).item()
+            
             if opt_profile["cache_latents"]:
-                idx = torch.randint(0, len(cached_latents), (1,)).item()
-                latents = cached_latents[idx].to(device, dtype=weight_dtype)
-                encoder_hidden_states = cached_text_embeds[idx].to(device, dtype=weight_dtype)
+                shape = tuple(dataset.image_buckets[idx_first])
+                pool = shape_to_indices[shape]
+                batch_indices = random.choices(pool, k=batch_size)
+                
+                latents = torch.cat([cached_latents[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
+                encoder_hidden_states = torch.cat([cached_text_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
             else:
-                idx = torch.randint(0, len(dataset), (1,)).item()
-                batch = dataset[idx]
-                pixel_values = batch["pixel_values"].unsqueeze(0).to(device, dtype=weight_dtype)
-                input_ids = batch["input_ids"].unsqueeze(0).to(device)
+                shape = tuple(dataset.image_buckets[idx_first])
+                pool = shape_to_indices[shape]
+                batch_indices = random.choices(pool, k=batch_size)
+                
+                batches = [dataset[i] for i in batch_indices]
+                pixel_values = torch.stack([b["pixel_values"] for b in batches]).to(device, dtype=weight_dtype)
+                input_ids = torch.stack([b["input_ids"] for b in batches]).to(device)
                 
                 with torch.no_grad():
                     latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
@@ -649,6 +722,12 @@ class LoRATrainer:
             
             # Sample noise
             noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
+            
+            if noise_offset > 0.0:
+                # Add channel-wise mean offset (crucial for learning bright/dark concepts)
+                offset = torch.randn(latents.shape[0], latents.shape[1], 1, 1, device=device, dtype=weight_dtype, generator=generator)
+                noise = noise + noise_offset * offset
+                
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
             
             # Add noise to latents

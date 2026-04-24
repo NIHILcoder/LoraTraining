@@ -70,6 +70,9 @@ export interface TrainingConfig {
   mixedPrecision: 'fp16' | 'bf16' | 'fp32';
   gradientAccumulation: number;
   clipSkip: number;
+  enableBucketing?: boolean;
+  captionDropout?: number;
+  noiseOffset?: number;
   datasetId?: string;
   baseModel: BaseModelType;
 }

@@ -18,6 +18,9 @@ const defaultConfig: TrainingConfig = {
   mixedPrecision: 'bf16',
   gradientAccumulation: 1,
   clipSkip: 1,
+  enableBucketing: true,
+  captionDropout: 0.1,
+  noiseOffset: 0.05,
 };
 
 const defaultTrainingStatus: TrainingStatus = {

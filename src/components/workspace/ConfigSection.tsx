@@ -254,6 +254,24 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
 
             {showAdvanced && (
               <>
+                <ParamSelect label="AR Bucketing" value={config.enableBucketing ? 'true' : 'false'}
+                  options={[
+                    { value: 'true', label: 'Enabled' },
+                    { value: 'false', label: 'Disabled' },
+                  ]}
+                  tooltip="Aspect Ratio Bucketing. Groups images by ratio to prevent distortion."
+                  onChange={(v) => updateConfig({ enableBucketing: v === 'true' })}
+                />
+                <ParamSlider label="Caption Dropout" value={config.captionDropout ?? 0.1}
+                  min={0} max={1} step={0.05}
+                  tooltip="Probability to ignore captions. Forces the model to learn the subject independently of text."
+                  onChange={(v) => updateConfig({ captionDropout: v })}
+                />
+                <ParamSlider label="Noise Offset" value={config.noiseOffset ?? 0.05}
+                  min={0} max={0.2} step={0.01}
+                  tooltip="Adds noise offset to improve the model's ability to generate very dark or bright images."
+                  onChange={(v) => updateConfig({ noiseOffset: v })}
+                />
                 <ParamSlider label="Seed" value={config.seed}
                   min={0} max={99999} step={1}
                   tooltip="Random seed for reproducibility"
