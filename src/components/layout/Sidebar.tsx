@@ -32,7 +32,7 @@ export function Sidebar() {
         </div>
         <div className="sidebar__brand-text">
           <span className="sidebar__brand-name">LoRA Studio</span>
-          <span className="sidebar__brand-version">v1.0.0</span>
+          <span className="sidebar__brand-version">v1.0.0-beta.1</span>
         </div>
       </div>
 
