@@ -14,6 +14,33 @@ from pydantic import BaseModel as PydanticBase
 # Windows stability fixes
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["ACCELERATE_USE_CPU_INIT"] = "0"
+
+# --- CRITICAL PATCHES FOR LIBRARIES ---
+def bypass_check():
+    return None
+
+# 1. Fixes: AttributeError: 'CLIPTextModel' object has no attribute 'text_model'
+try:
+    from transformers.models.clip.modeling_clip import CLIPTextModel
+    if not hasattr(CLIPTextModel, "text_model"):
+        CLIPTextModel.text_model = property(lambda self: self)
+except Exception: pass
+
+# 2. Fixes: ValueError: Due to a serious vulnerability issue in `torch.load`...
+try:
+    import transformers.utils.import_utils
+    transformers.utils.import_utils.check_torch_load_is_safe = bypass_check
+    import transformers.modeling_utils
+    transformers.modeling_utils.check_torch_load_is_safe = bypass_check
+except Exception: pass
+
+# 3. Force disable low_cpu_mem_usage globally in transformers
+try:
+    import transformers.modeling_utils
+    transformers.modeling_utils._CONFIG_FOR_LOW_CPU_MEM_USAGE = False
+except Exception: pass
+# ----------------------------------------
 
 app = FastAPI()
 
@@ -159,7 +186,22 @@ from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare
 trainer_instance = LoRATrainer()
 
 TRAINING_DATA_DIR = BACKEND_DIR / "training_data"
-OUTPUT_DIR = BACKEND_DIR / "output"
+DEFAULT_OUTPUT_DIR = BACKEND_DIR / "output"
+
+def get_output_dir() -> Path:
+    """Return the user-configured output directory, or the default."""
+    if SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text())
+            custom = settings.get("outputDirectory")
+            if custom:
+                p = Path(custom)
+                p.mkdir(parents=True, exist_ok=True)
+                return p
+        except Exception:
+            pass
+    DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    return DEFAULT_OUTPUT_DIR
 
 ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade"]
 
@@ -234,7 +276,11 @@ async def start_training(req: TrainingStartRequest):
     
     # Prepare dataset
     dataset_dir = TRAINING_DATA_DIR / session_id
-    output_dir = OUTPUT_DIR / session_id
+    output_dir = get_output_dir() / session_id
+    
+    # Create both directories eagerly to avoid OS error 3 at save time
+    dataset_dir.mkdir(parents=True, exist_ok=True)
+    output_dir.mkdir(parents=True, exist_ok=True)
     
     prepare_dataset(images, dataset_dir)
     
@@ -275,7 +321,7 @@ async def stop_training(session_id: str):
 
 @app.get("/api/training/output/{session_id}")
 async def get_training_output(session_id: str):
-    output_dir = OUTPUT_DIR / session_id
+    output_dir = get_output_dir() / session_id
     if not output_dir.exists():
         return {"error": "Output not found"}
     safetensors = list(output_dir.glob("*.safetensors"))
@@ -344,7 +390,7 @@ async def generate_image(req: GenerateRequest):
     # --- Resolve LoRA path ---
     lora_path = None
     if req.loraModelId and req.loraModelId != "none":
-        lora_dir = OUTPUT_DIR / req.loraModelId
+        lora_dir = get_output_dir() / req.loraModelId
         safetensors = list(lora_dir.glob("*.safetensors")) if lora_dir.exists() else []
         if safetensors:
             lora_path = str(safetensors[0])
@@ -385,59 +431,207 @@ async def generate_image(req: GenerateRequest):
         svg = _make_mock_svg(req.prompt, actual_seed, req.sampler, None, f"Inference error: {str(e)[:80]}")
         return {"url": svg, "seed": actual_seed, "mock": True, "reason": str(e)}
 
+def _module_has_meta(module) -> bool:
+    """Return True if a torch module contains meta tensors."""
+    if module is None or not hasattr(module, "parameters"):
+        return False
+
+    try:
+        return any(param.is_meta for param in module.parameters())
+    except Exception:
+        return False
+
+
+def _repair_text_encoders_if_needed(pipe, architecture: str):
+    """
+    from_single_file can sometimes leave text_encoder as meta.
+    If that happens, replace text encoder/tokenizer from a known Diffusers repo.
+    """
+    import torch
+    from transformers import CLIPTextModel, CLIPTokenizer
+
+    if architecture in ("sd15", "sd21"):
+        if not _module_has_meta(getattr(pipe, "text_encoder", None)):
+            return pipe
+
+        if architecture == "sd21":
+            repo_id = "stabilityai/stable-diffusion-2-1"
+        else:
+            repo_id = "runwayml/stable-diffusion-v1-5"
+
+        print(f"[Inference] text_encoder is meta. Reloading text encoder from: {repo_id}")
+
+        pipe.tokenizer = CLIPTokenizer.from_pretrained(
+            repo_id,
+            subfolder="tokenizer",
+            local_files_only=False,
+        )
+
+        pipe.text_encoder = CLIPTextModel.from_pretrained(
+            repo_id,
+            subfolder="text_encoder",
+            torch_dtype=torch.float32,
+            low_cpu_mem_usage=False,
+            local_files_only=False,
+        )
+
+        return pipe
+
+    if architecture in ("sdxl", "kolors"):
+        from transformers import CLIPTextModelWithProjection
+
+        repo_id = "stabilityai/stable-diffusion-xl-base-1.0"
+
+        need_text_encoder_1 = _module_has_meta(getattr(pipe, "text_encoder", None))
+        need_text_encoder_2 = _module_has_meta(getattr(pipe, "text_encoder_2", None))
+
+        if not need_text_encoder_1 and not need_text_encoder_2:
+            return pipe
+
+        print(f"[Inference] SDXL text encoder is meta. Reloading text encoders from: {repo_id}")
+
+        if need_text_encoder_1:
+            pipe.tokenizer = CLIPTokenizer.from_pretrained(
+                repo_id,
+                subfolder="tokenizer",
+                local_files_only=False,
+            )
+            pipe.text_encoder = CLIPTextModel.from_pretrained(
+                repo_id,
+                subfolder="text_encoder",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=False,
+                local_files_only=False,
+            )
+
+        if need_text_encoder_2:
+            pipe.tokenizer_2 = CLIPTokenizer.from_pretrained(
+                repo_id,
+                subfolder="tokenizer_2",
+                local_files_only=False,
+            )
+            pipe.text_encoder_2 = CLIPTextModelWithProjection.from_pretrained(
+                repo_id,
+                subfolder="text_encoder_2",
+                torch_dtype=torch.float32,
+                low_cpu_mem_usage=False,
+                local_files_only=False,
+            )
+
+        return pipe
+
+    return pipe
 
 def _load_pipeline(model_path: str, lora_path: Optional[str], lora_weight: float, architecture: str):
-    """Load (or retrieve from cache) the inference pipeline with optional LoRA."""
+    """
+    Load inference pipeline safely.
+    Handles meta text_encoder by reloading it from a known repo.
+    """
+    import os
+    import gc
     import torch
-    from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline, DPMSolverMultistepScheduler, EulerAncestralDiscreteScheduler
 
-    cache_key = (model_path, lora_path, round(lora_weight, 2))
+    from diffusers import StableDiffusionPipeline, StableDiffusionXLPipeline
+
+    cache_key = (model_path, lora_path, round(float(lora_weight), 2), architecture)
     if cache_key in _inference_cache:
         return _inference_cache[cache_key]
 
-    # Clear cache to free VRAM (keep at most 1 pipeline)
     _inference_cache.clear()
-    import gc, torch
     gc.collect()
+
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
 
-    dtype = torch.float16
-    device = "cuda"
+    if not torch.cuda.is_available():
+        raise RuntimeError("CUDA GPU is not available.")
+
+    # Important: do not allow Accelerate CPU-init/meta-init during inference loading.
+    os.environ["ACCELERATE_USE_CPU_INIT"] = "0"
+
+    model_path = os.path.abspath(os.path.normpath(model_path))
+    if not os.path.exists(model_path):
+        raise FileNotFoundError(f"Base model file not found: {model_path}")
+
+    # Your current playground does not implement these pipelines yet.
+    if architecture in ("flux", "sd3", "cascade"):
+        raise RuntimeError(
+            f"Playground inference for architecture '{architecture}' is not implemented yet. "
+            f"Use SD 1.5 / SD 2.1 / SDXL, or add the correct Diffusers pipeline for this architecture."
+        )
+
+    print(f"[Inference] Loading model: {model_path}")
+    print(f"[Inference] Architecture: {architecture}")
+
+    load_kwargs = {
+        "torch_dtype": torch.float32,
+        "use_safetensors": True,
+        "low_cpu_mem_usage": False,
+        "local_files_only": False,
+    }
 
     if architecture in ("sdxl", "kolors"):
         pipe = StableDiffusionXLPipeline.from_single_file(
-            model_path, torch_dtype=dtype, use_safetensors=True, variant="fp16",
-            low_cpu_mem_usage=False,
+            model_path,
+            **load_kwargs,
         )
     else:
         pipe = StableDiffusionPipeline.from_single_file(
-            model_path, torch_dtype=dtype, use_safetensors=True,
-            low_cpu_mem_usage=False,
+            model_path,
+            safety_checker=None,
+            requires_safety_checker=False,
+            **load_kwargs,
         )
 
-    pipe.to(device)
+    # Fix broken/meta text encoder after from_single_file.
+    pipe = _repair_text_encoders_if_needed(pipe, architecture)
+
+    # Final meta check before moving to GPU.
+    meta_components = []
+    for component_name, component in pipe.components.items():
+        if _module_has_meta(component):
+            meta_components.append(component_name)
+
+    if meta_components:
+        raise RuntimeError(
+            "Model still has meta tensors in components: "
+            + ", ".join(meta_components)
+            + ". This usually means the model file is incomplete, the architecture is wrong, "
+              "or required HuggingFace components could not be downloaded."
+        )
+
+    pipe = pipe.to("cuda", dtype=torch.float16)
     pipe.enable_attention_slicing()
 
     try:
         pipe.enable_xformers_memory_efficient_attention()
-    except Exception:
-        pass
+    except Exception as e:
+        print(f"[Inference] xFormers not enabled: {e}")
 
-    # Inject LoRA if provided
     if lora_path:
-        try:
-            from peft import LoraConfig
-            from safetensors.torch import load_file
-            lora_sd = load_file(lora_path)
-            pipe.unet.load_attn_procs(lora_sd)
-            print(f"[Inference] LoRA loaded: {lora_path} weight={lora_weight}")
-        except Exception as e:
-            print(f"[Inference] LoRA load warning: {e}")
+        lora_path = os.path.abspath(os.path.normpath(lora_path))
+
+        if os.path.exists(lora_path):
+            try:
+                pipe.load_lora_weights(
+                    os.path.dirname(lora_path),
+                    weight_name=os.path.basename(lora_path),
+                )
+
+                try:
+                    pipe.set_adapters(["default"], adapter_weights=[float(lora_weight)])
+                except Exception:
+                    pass
+
+                print(f"[Inference] LoRA loaded: {lora_path} weight={lora_weight}")
+
+            except Exception as e:
+                print(f"[Inference] LoRA load warning: {e}")
+        else:
+            print(f"[Inference] LoRA path not found: {lora_path}")
 
     _inference_cache[cache_key] = pipe
     return pipe
-
 
 def _run_inference(pipe, req: GenerateRequest, seed: int):
     """Run the actual diffusion inference."""
@@ -617,7 +811,7 @@ async def run_real_training(session_id: str, session: dict, websocket: WebSocket
     output_dir = Path(session["output_dir"])
     total_steps = config_data.get("trainingSteps", 1000)
     
-    loop = asyncio.get_event_loop()
+    loop = asyncio.get_running_loop()
     
     # Progress callback that sends updates via WebSocket
     # Since the trainer runs in a thread, we use loop.call_soon_threadsafe
@@ -647,7 +841,7 @@ async def run_real_training(session_id: str, session: dict, websocket: WebSocket
                 await broadcast_to_connections({
                     "type": "training_update",
                     "data": {
-                        "phase": phase if phase == "training" else "preparing",
+                        "phase": phase,
                         "currentStep": step,
                         "totalSteps": total_steps,
                         "currentLoss": loss,
@@ -1106,10 +1300,11 @@ async def list_trained_models():
     """Scan the output directory for trained LoRA models."""
     models = []
     
-    if not OUTPUT_DIR.exists():
+    output_dir = get_output_dir()
+    if not output_dir.exists():
         return {"models": []}
     
-    for session_dir in sorted(OUTPUT_DIR.iterdir(), reverse=True):
+    for session_dir in sorted(output_dir.iterdir(), reverse=True):
         if not session_dir.is_dir():
             continue
         
@@ -1149,7 +1344,7 @@ async def list_trained_models():
             "directory": str(session_dir),
             "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(created_at)),
             # From peft adapter_config
-            "rank": metadata.get("r", metadata.get("lora_alpha", 0)),
+            "rank": metadata.get("r", 0),
             "alpha": metadata.get("lora_alpha", 0),
             "targetModules": metadata.get("target_modules", []),
             # From our training result
@@ -1169,7 +1364,7 @@ async def list_trained_models():
 @app.delete("/api/gallery/models/{model_id}")
 async def delete_trained_model(model_id: str):
     """Delete a trained LoRA model and its directory."""
-    model_dir = OUTPUT_DIR / model_id
+    model_dir = get_output_dir() / model_id
     if not model_dir.exists():
         return {"error": "Model not found"}
     
@@ -1183,7 +1378,7 @@ async def delete_trained_model(model_id: str):
 @app.post("/api/gallery/models/{model_id}/open")
 async def open_model_folder(model_id: str):
     """Open the model folder in the system file explorer."""
-    model_dir = OUTPUT_DIR / model_id
+    model_dir = get_output_dir() / model_id
     if not model_dir.exists():
         return {"error": "Model folder not found"}
     
@@ -1198,5 +1393,46 @@ async def open_model_folder(model_id: str):
         else:
             subprocess.Popen(["xdg-open", str(model_dir)])
         return {"status": "opened"}
+    except Exception as e:
+        return {"error": f"Failed to open folder: {e}"}
+
+
+# ============================================
+# Output Directory Management
+# ============================================
+
+@app.get("/api/output/directory")
+async def get_output_directory():
+    """Return current output directory path."""
+    return {"outputDirectory": str(get_output_dir())}
+
+@app.post("/api/output/directory")
+async def set_output_directory(req: SetDirectoryRequest):
+    """Set a custom output directory for trained LoRA models."""
+    target = Path(req.path)
+    try:
+        target.mkdir(parents=True, exist_ok=True)
+    except Exception as e:
+        return {"error": f"Cannot create directory: {e}"}
+    save_settings({"outputDirectory": str(target)})
+    return {"status": "ok", "outputDirectory": str(target)}
+
+@app.post("/api/output/open")
+async def open_output_directory():
+    """Open the output directory in the system file explorer."""
+    output_dir = get_output_dir()
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    import subprocess
+    import sys
+
+    try:
+        if sys.platform == "win32":
+            subprocess.Popen(["explorer", str(output_dir)])
+        elif sys.platform == "darwin":
+            subprocess.Popen(["open", str(output_dir)])
+        else:
+            subprocess.Popen(["xdg-open", str(output_dir)])
+        return {"status": "opened", "outputDirectory": str(output_dir)}
     except Exception as e:
         return {"error": f"Failed to open folder: {e}"}

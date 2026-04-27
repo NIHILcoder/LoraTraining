@@ -269,4 +269,29 @@ export async function getModelsDirectory(): Promise<{ modelsDirectory: string }>
   return response.json();
 }
 
+// --- Output Directory Management ---
+
+export async function fetchOutputDirectory(): Promise<{ outputDirectory: string }> {
+  const response = await fetch(`${API_BASE}/output/directory`);
+  if (!response.ok) throw new Error('Failed to get output directory');
+  return response.json();
+}
+
+export async function setOutputDirectory(path: string): Promise<{ outputDirectory: string }> {
+  const response = await fetch(`${API_BASE}/output/directory`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ path }),
+  });
+  if (!response.ok) throw new Error('Failed to set output directory');
+  return response.json();
+}
+
+export async function openOutputDirectory(): Promise<void> {
+  const response = await fetch(`${API_BASE}/output/open`, {
+    method: 'POST',
+  });
+  if (!response.ok) throw new Error('Failed to open output directory');
+}
+
 export { generateId };

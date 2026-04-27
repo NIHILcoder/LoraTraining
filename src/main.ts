@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Notification } from 'electron';
+import { app, BrowserWindow, ipcMain, Notification, dialog } from 'electron';
 import * as path from 'path';
 
 import { checkEnvExists, installEnvironment, startBackend, stopBackend } from './backend_manager';
@@ -40,6 +40,7 @@ function createWindow() {
   ipcMain.removeAllListeners('show-notification');
   ipcMain.removeAllListeners('install-env');
   ipcMain.removeAllListeners('start-backend');
+  ipcMain.removeAllListeners('select-directory');
 
   ipcMain.on('window-min', () => mainWindow.minimize());
   ipcMain.on('window-max', () => {
@@ -99,6 +100,15 @@ function createWindow() {
       console.error(`[Backend Error] ${err.message}`);
       safeSend('backend-started', { success: false, error: err.message });
     }
+  });
+
+  ipcMain.handle('select-directory', async (_event, title?: string) => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: title || 'Select Directory',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
   });
 }
 

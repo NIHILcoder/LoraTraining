@@ -14,6 +14,8 @@ import {
   Sparkles,
   FileBox,
   ChevronDown,
+  FolderCog,
+  ExternalLink,
 } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { Header } from '../components/layout/Header';
@@ -21,8 +23,11 @@ import { Card } from '../components/ui/Card';
 import { Badge } from '../components/ui/Badge';
 import { Button } from '../components/ui/Button';
 import { Modal } from '../components/ui/Modal';
-import { fetchModels, deleteModel, openModelFolder } from '../services/api';
+import { fetchModels, deleteModel, openModelFolder, fetchOutputDirectory, setOutputDirectory, openOutputDirectory } from '../services/api';
 import './GalleryPage.css';
+
+// Electron IPC for native folder picker
+const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
 
 interface TrainedModel {
   id: string;
@@ -53,10 +58,21 @@ export function GalleryPage() {
   const [sortBy, setSortBy] = useState<SortKey>('date');
   const [sortDropdownOpen, setSortDropdownOpen] = useState(false);
   const [deleteTarget, setDeleteTarget] = useState<TrainedModel | null>(null);
+  const [outputDir, setOutputDir] = useState<string>('');
 
   useEffect(() => {
     loadModels();
+    loadOutputDir();
   }, []);
+
+  const loadOutputDir = async () => {
+    try {
+      const data = await fetchOutputDirectory();
+      setOutputDir(data.outputDirectory);
+    } catch (err) {
+      console.error('Failed to load output directory:', err);
+    }
+  };
 
   const loadModels = async () => {
     try {
@@ -87,6 +103,39 @@ export function GalleryPage() {
       await openModelFolder(id);
     } catch (err) {
       console.error('Failed to open folder:', err);
+    }
+  };
+
+  const handleChangeOutputDir = async () => {
+    try {
+      let selectedPath: string | null = null;
+
+      if (ipcRenderer) {
+        // Native Electron folder picker
+        selectedPath = await ipcRenderer.invoke('select-directory', 'Select Output Directory for Trained Models');
+      } else {
+        // Fallback: prompt
+        selectedPath = prompt('Enter the output directory path:', outputDir);
+      }
+
+      if (!selectedPath) return;
+
+      const result = await setOutputDirectory(selectedPath);
+      if (result.outputDirectory) {
+        setOutputDir(result.outputDirectory);
+        // Reload models since directory changed
+        loadModels();
+      }
+    } catch (err) {
+      console.error('Failed to change output directory:', err);
+    }
+  };
+
+  const handleOpenOutputDir = async () => {
+    try {
+      await openOutputDirectory();
+    } catch (err) {
+      console.error('Failed to open output directory:', err);
     }
   };
 
@@ -181,6 +230,26 @@ export function GalleryPage() {
           </div>
         }
       />
+
+      {/* Output Directory Bar */}
+      {outputDir && (
+        <div className="gallery-output-bar">
+          <div className="gallery-output-bar__info">
+            <FolderCog size={15} className="gallery-output-bar__icon" />
+            <span className="gallery-output-bar__label">Output:</span>
+            <span className="gallery-output-bar__path" title={outputDir}>{outputDir}</span>
+          </div>
+          <div className="gallery-output-bar__actions">
+            <button className="gallery-output-bar__btn" onClick={handleChangeOutputDir} title="Change output directory">
+              Change
+            </button>
+            <button className="gallery-output-bar__btn gallery-output-bar__btn--open" onClick={handleOpenOutputDir} title="Open in Explorer">
+              <ExternalLink size={13} />
+              Open
+            </button>
+          </div>
+        </div>
+      )}
 
       {loading ? (
         <div className="gallery-loading">

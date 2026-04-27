@@ -16,7 +16,7 @@ from typing import Dict, Any, List, Optional, Callable
 # Windows stability fixes
 os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
-os.environ["ACCELERATE_USE_CPU_INIT"] = "1"
+os.environ["ACCELERATE_USE_CPU_INIT"] = "0"
 
 # --- CRITICAL PATCHES FOR LIBRARIES ---
 def bypass_check():
@@ -622,6 +622,10 @@ class LoRATrainer:
         vae = pipe.vae
         noise_scheduler = DDPMScheduler.from_config(pipe.scheduler.config)
         
+        # Free the pipeline shell — we extracted the components we need
+        del pipe
+        gc.collect()
+        
         # Move VAE to GPU for latent caching, then offload
         vae.to(device, dtype=weight_dtype)
         vae.requires_grad_(False)
@@ -827,7 +831,7 @@ class LoRATrainer:
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            with torch.cuda.amp.autocast(dtype=weight_dtype):
+            with torch.amp.autocast("cuda", dtype=weight_dtype):
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs=added_cond_kwargs).sample
             
             loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
@@ -850,7 +854,10 @@ class LoRATrainer:
 
             # Report progress every 5 steps
             if step % 5 == 0 or step == total_steps - 1:
-                current_lr = lr_scheduler.get_last_lr()[0]
+                try:
+                    current_lr = lr_scheduler.get_last_lr()[0]
+                except RuntimeError:
+                    current_lr = learning_rate
                 avg_loss = running_loss / loss_count if loss_count > 0 else 0
                 elapsed = time.time() - start_time
                 eta = (elapsed / max(step + 1, 1)) * (total_steps - step - 1)
@@ -875,6 +882,7 @@ class LoRATrainer:
                               message="Saving LoRA weights...")
         
         # Save LoRA weights
+        output_dir.mkdir(parents=True, exist_ok=True)
         lora_name = config.get("name", "lora_output")
         safe_name = "".join(c if c.isalnum() or c in "-_ " else "_" for c in lora_name).strip()
         if not safe_name:
