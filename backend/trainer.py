@@ -5,9 +5,18 @@ Real training module using HuggingFace diffusers + peft.
 Automatically adapts to available GPU VRAM.
 """
 
-import subprocess
 import gc
 import random
+import os
+import time
+import threading
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Callable
+
+# Windows stability fixes
+os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
+os.environ["PYTHONUNBUFFERED"] = "1"
+os.environ["ACCELERATE_USE_CPU_INIT"] = "1"
 
 # --- CRITICAL PATCHES FOR LIBRARIES ---
 def bypass_check():
@@ -45,13 +54,8 @@ try:
     transformers.modeling_utils._CONFIG_FOR_LOW_CPU_MEM_USAGE = False
 except Exception: pass
 # ----------------------------------------
-import os
-import time
-import uuid
-import shutil
-import threading
-from pathlib import Path
-from typing import Optional, Callable, Dict, Any, List
+import math
+import json
 
 import torch
 
@@ -542,12 +546,14 @@ class LoRATrainer:
         
         # Load the appropriate pipeline
         try:
-            # We use the most basic loading possible to avoid meta-tensor bugs on Windows
+            # Load pipeline from single file for UNet, VAE, scheduler
             load_kwargs = {
+                "torch_dtype": torch.float32,
                 "use_safetensors": True,
                 "load_safety_checker": False,
                 "requires_safety_checker": False,
                 "local_files_only": False,
+                "low_cpu_mem_usage": False,
             }
             
             if architecture == "sdxl":
@@ -555,18 +561,55 @@ class LoRATrainer:
             else:  # sd15
                 pipe = StableDiffusionPipeline.from_single_file(model_path, **load_kwargs)
             
-            # Final attempt to move to device
-            print(f"[Trainer] Moving model to {device}...")
-            pipe.to(device, dtype=weight_dtype)
+            print(f"[Trainer] Pipeline loaded from single file.")
             
-            text_encoder_one = pipe.text_encoder
-            text_encoder_two = getattr(pipe, "text_encoder_2", None)
-            tokenizer_one = pipe.tokenizer
-            tokenizer_two = getattr(pipe, "tokenizer_2", None)
+            # --- CRITICAL FIX: Load text encoder & tokenizer from known pretrained sources ---
+            # from_single_file often creates text encoder with wrong position_embeddings config,
+            # causing "index out of range" errors. The text encoder is frozen during LoRA training
+            # anyway, so loading canonical pretrained weights is correct and safe.
+            from transformers import CLIPTextModel, CLIPTokenizer
             
+            if architecture == "sdxl":
+                from transformers import CLIPTextModelWithProjection
+                print("[Trainer] Loading SDXL text encoders from pretrained...")
+                tokenizer_one = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                text_encoder_one = CLIPTextModel.from_pretrained(
+                    "openai/clip-vit-large-patch14", torch_dtype=torch.float32
+                )
+                tokenizer_two = CLIPTokenizer.from_pretrained(
+                    "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
+                )
+                text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
+                    "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", torch_dtype=torch.float32
+                )
+            else:  # sd15
+                print("[Trainer] Loading SD1.5 text encoder from pretrained (openai/clip-vit-large-patch14)...")
+                tokenizer_one = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
+                text_encoder_one = CLIPTextModel.from_pretrained(
+                    "openai/clip-vit-large-patch14", torch_dtype=torch.float32
+                )
+                tokenizer_two = None
+                text_encoder_two = None
+            
+            # Verify text encoder works on CPU
+            print(f"[Trainer] Verifying text encoder on CPU...")
+            text_encoder_one.eval()
+            with torch.no_grad():
+                test_tokens = tokenizer_one(
+                    "test", padding="max_length", max_length=77,
+                    truncation=True, return_tensors="pt"
+                )
+                test_out = text_encoder_one(test_tokens.input_ids, output_hidden_states=True)
+                print(f"[Trainer] Text encoder OK. Output shape: {test_out.hidden_states[-1].shape}")
+            
+            # Move text encoders to GPU
+            text_encoder_one.to(device, dtype=weight_dtype)
             text_encoder_one.requires_grad_(False)
             if text_encoder_two:
+                text_encoder_two.to(device, dtype=weight_dtype)
                 text_encoder_two.requires_grad_(False)
+            
+            print(f"[Trainer] Text encoder(s) on {device} in {weight_dtype}")
                 
         except Exception as e:
             import traceback
@@ -587,42 +630,44 @@ class LoRATrainer:
         if progress_callback:
             progress_callback(step=0, loss=0, lr=0, phase="preparing",
                               message="Preparing dataset and caching latents...")
-        
         def encode_prompt(caption: str):
-            # Tokenize and encode with text_encoder_one
+            """Encode a text prompt into embeddings using the text encoder(s)."""
+            clip_skip = config.get("clipSkip", 1)
+            max_len = 77 if architecture == "sd15" else tokenizer_one.model_max_length
+            
             inputs_one = tokenizer_one(
-                caption, padding="max_length", max_length=tokenizer_one.model_max_length, truncation=True, return_tensors="pt"
+                caption, padding="max_length", max_length=max_len, truncation=True, return_tensors="pt"
             ).to(device)
             
-            # SAFE ACCESS for text_encoder (the fix)
-            def get_text_model_output(model, input_ids):
-                # If it's a CLIPTextModel, sometimes it has .text_model, sometimes it IS the text_model
-                if hasattr(model, "text_model"):
-                    return model.text_model(input_ids)[0]
-                return model(input_ids)[0]
-
-            prompt_embeds = get_text_model_output(text_encoder_one, inputs_one.input_ids)
+            # Validate token IDs to prevent CUDA device-side asserts (out of bounds)
+            vocab_size = text_encoder_one.config.vocab_size
+            if (inputs_one.input_ids >= vocab_size).any():
+                print(f"[Trainer] WARNING: Token IDs out of bounds (vocab_size={vocab_size}). Clamping.")
+                inputs_one.input_ids = torch.clamp(inputs_one.input_ids, 0, vocab_size - 1)
+            
+            # Use output_hidden_states for proper penultimate layer extraction
+            outputs_one = text_encoder_one(inputs_one.input_ids, output_hidden_states=True)
+            # clip_skip=1 means last layer, clip_skip=2 means penultimate, etc.
+            prompt_embeds = outputs_one.hidden_states[-clip_skip]
             
             if architecture == "sdxl" and text_encoder_two:
                 inputs_two = tokenizer_two(
                     caption, padding="max_length", max_length=tokenizer_two.model_max_length, truncation=True, return_tensors="pt"
                 ).to(device)
-                prompt_embeds_two = text_encoder_two(inputs_two.input_ids, output_hidden_states=True)
                 
-                # SDXL specific concatenation
-                pooled_embeds = prompt_embeds_two[0]
-                prompt_embeds_two = prompt_embeds_two.hidden_states[-2]
+                vocab_size_two = text_encoder_two.config.vocab_size
+                if (inputs_two.input_ids >= vocab_size_two).any():
+                    inputs_two.input_ids = torch.clamp(inputs_two.input_ids, 0, vocab_size_two - 1)
                 
-                # Combine prompt embeds
+                outputs_two = text_encoder_two(inputs_two.input_ids, output_hidden_states=True)
+                pooled_embeds = outputs_two[0]  # pooled output
+                prompt_embeds_two = outputs_two.hidden_states[-2]  # penultimate layer
+                
                 prompt_embeds = torch.cat([prompt_embeds, prompt_embeds_two], dim=-1)
                 return prompt_embeds, pooled_embeds
             
             return prompt_embeds, None
 
-        # --- Phase: Preparing Dataset ---
-        if progress_callback:
-            progress_callback(step=0, loss=0, lr=0, phase="preparing",
-                              message="Preparing dataset and caching latents...")
         
         resolution = config.get("resolution", 512)
         enable_bucketing = config.get("enableBucketing", True)
@@ -696,14 +741,24 @@ class LoRATrainer:
         optimizer_type = config.get("optimizer", "AdamW")
         lora_params = [p for p in unet.parameters() if p.requires_grad]
         
-        optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
+        # Select optimizer based on config
+        if optimizer_type == "AdamW8bit":
+            try:
+                import bitsandbytes as bnb
+                optimizer = bnb.optim.AdamW8bit(lora_params, lr=learning_rate, weight_decay=1e-2)
+            except ImportError:
+                print("[Trainer] bitsandbytes not available, falling back to AdamW")
+                optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
+        elif optimizer_type == "SGD":
+            optimizer = torch.optim.SGD(lora_params, lr=learning_rate, momentum=0.9, weight_decay=1e-2)
+        else:  # Default: AdamW
+            optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
         
         total_steps = config.get("trainingSteps", 1000)
         warmup_steps = config.get("warmupSteps", 0)
         scheduler_type = config.get("scheduler", "cosine")
         
         from torch.optim.lr_scheduler import LambdaLR
-        import math
         
         def lr_lambda(current_step: int):
             if current_step < warmup_steps:
@@ -717,11 +772,11 @@ class LoRATrainer:
         
         # --- Training Loop Setup ---
         seed = config.get("seed", 42)
+        noise_offset = config.get("noiseOffset", 0.0)
         batch_size = min(config.get("batchSize", 1), opt_profile["max_batch_size"])
         grad_accum = config.get("gradientAccumulation", 1)
         generator = torch.Generator(device=device).manual_seed(seed)
         
-        import random
         shape_to_indices = {}
         for i in range(len(dataset)):
             shape = tuple(dataset.image_buckets[i])
@@ -753,10 +808,22 @@ class LoRATrainer:
             added_cond_kwargs = {}
             if architecture == "sdxl" and cached_pooled_embeds:
                 pooled_embeds = torch.cat([cached_pooled_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
-                res_tensor = torch.tensor([resolution, resolution], device=device, dtype=weight_dtype).repeat(batch_size, 1)
-                added_cond_kwargs = {"text_embeds": pooled_embeds, "time_ids": torch.cat([res_tensor, torch.zeros_like(res_tensor), res_tensor], dim=1)}
+                # SDXL time_ids: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
+                bucket_w, bucket_h = dataset.image_buckets[batch_indices[0]]
+                time_ids = torch.tensor(
+                    [bucket_h, bucket_w, 0, 0, bucket_h, bucket_w],
+                    device=device, dtype=weight_dtype
+                ).unsqueeze(0).repeat(batch_size, 1)
+                added_cond_kwargs = {"text_embeds": pooled_embeds, "time_ids": time_ids}
             
             noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
+            
+            # Apply noise offset for better brightness range
+            if noise_offset > 0:
+                noise = noise + noise_offset * torch.randn(
+                    (noise.shape[0], noise.shape[1], 1, 1), device=noise.device, dtype=noise.dtype
+                )
+            
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
@@ -780,18 +847,10 @@ class LoRATrainer:
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
-            
-            # Track metrics
-            loss_value = loss.item() * grad_accum
-            running_loss += loss_value
-            loss_count += 1
-            
-            if loss_value < best_loss:
-                best_loss = loss_value
-            
+
             # Report progress every 5 steps
             if step % 5 == 0 or step == total_steps - 1:
-                current_lr = lr_scheduler.get_last_lr()[0] * learning_rate if optimizer_type not in ["Prodigy", "DAdaptAdam"] else lr_scheduler.get_last_lr()[0]
+                current_lr = lr_scheduler.get_last_lr()[0]
                 avg_loss = running_loss / loss_count if loss_count > 0 else 0
                 elapsed = time.time() - start_time
                 eta = (elapsed / max(step + 1, 1)) * (total_steps - step - 1)
@@ -824,10 +883,9 @@ class LoRATrainer:
         lora_filename = f"{safe_name}.safetensors"
         lora_path = output_dir / lora_filename
         
-        # Save in kohya/standard format (single .safetensors file)
+        # Save in standard format (single .safetensors file)
         from peft.utils import get_peft_model_state_dict
         from safetensors.torch import save_file
-        import json as _json_save
         
         state_dict = get_peft_model_state_dict(unet)
         save_file(state_dict, str(lora_path))
@@ -837,12 +895,12 @@ class LoRATrainer:
         adapter_config = {
             "r": lora_rank,
             "lora_alpha": network_alpha,
-            "target_modules": list(lora_config.target_modules),
+            "target_modules": sorted(list(lora_config.target_modules)),
             "lora_dropout": 0.0,
             "peft_type": "LORA",
         }
         (output_dir / "adapter_config.json").write_text(
-            _json_save.dumps(adapter_config, indent=2)
+            json.dumps(adapter_config, indent=2)
         )
         
         # Cleanup
@@ -872,10 +930,9 @@ class LoRATrainer:
         }
         
         # Save training result metadata for Gallery
-        import json as _json
         result_meta_path = output_dir / "training_result.json"
         try:
-            result_meta_path.write_text(_json.dumps(result, indent=2, default=str))
+            result_meta_path.write_text(json.dumps(result, indent=2, default=str))
             print(f"[Trainer] Metadata saved: {result_meta_path}")
         except Exception as e:
             print(f"[Trainer] Warning: Could not save metadata: {e}")

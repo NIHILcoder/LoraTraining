@@ -9,7 +9,7 @@ function createWindow() {
     height: 800,
     minWidth: 1024,
     minHeight: 700,
-    frame: false, // Completely hide the standard titlebar
+    frame: false,
     webPreferences: {
       nodeIntegration: true,
       contextIsolation: false,
@@ -25,10 +25,21 @@ function createWindow() {
     mainWindow.loadFile(path.join(__dirname, 'index.html'));
   }
 
+  // Helper: safely send to renderer — no-op if window/webContents destroyed
+  const safeSend = (channel: string, ...args: any[]) => {
+    if (mainWindow && !mainWindow.isDestroyed() && mainWindow.webContents && !mainWindow.webContents.isDestroyed()) {
+      mainWindow.webContents.send(channel, ...args);
+    }
+  };
+
   // Setup IPC for custom titlebar
   ipcMain.removeAllListeners('window-min');
   ipcMain.removeAllListeners('window-max');
   ipcMain.removeAllListeners('window-close');
+  ipcMain.removeAllListeners('set-progress-bar');
+  ipcMain.removeAllListeners('show-notification');
+  ipcMain.removeAllListeners('install-env');
+  ipcMain.removeAllListeners('start-backend');
 
   ipcMain.on('window-min', () => mainWindow.minimize());
   ipcMain.on('window-max', () => {
@@ -38,13 +49,13 @@ function createWindow() {
   ipcMain.on('window-close', () => mainWindow.close());
 
   // Taskbar Progress and Notifications
-  ipcMain.on('set-progress-bar', (event, progress: number) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
+  ipcMain.on('set-progress-bar', (_event, progress: number) => {
+    if (!mainWindow.isDestroyed()) {
       mainWindow.setProgressBar(progress);
     }
   });
 
-  ipcMain.on('show-notification', (event, title: string, body: string) => {
+  ipcMain.on('show-notification', (_event, title: string, body: string) => {
     if (Notification.isSupported()) {
       new Notification({
         title,
@@ -57,36 +68,36 @@ function createWindow() {
   // Backend Setup IPC
   ipcMain.handle('check-env', () => checkEnvExists());
 
-  ipcMain.on('install-env', async (event) => {
+  ipcMain.on('install-env', async (_event) => {
     try {
       await installEnvironment(
         (msg) => {
           console.log(`[Install] ${msg}`);
-          event.sender.send('install-log', msg);
+          safeSend('install-log', msg);
         },
-        (pct) => event.sender.send('install-progress', pct),
+        (pct) => safeSend('install-progress', pct),
         (stepName, pct) => {
-          event.sender.send('install-step', stepName);
-          event.sender.send('install-progress', pct);
+          safeSend('install-step', stepName);
+          safeSend('install-progress', pct);
         }
       );
-      event.sender.send('install-complete', { success: true });
+      safeSend('install-complete', { success: true });
     } catch (err: any) {
       console.error(`[Install Error] ${err.message}`);
-      event.sender.send('install-complete', { success: false, error: err.message });
+      safeSend('install-complete', { success: false, error: err.message });
     }
   });
 
-  ipcMain.on('start-backend', async (event) => {
+  ipcMain.on('start-backend', async (_event) => {
     try {
       await startBackend((msg) => {
         console.log(`[Backend] ${msg}`);
-        event.sender.send('backend-log', msg);
+        safeSend('backend-log', msg);
       });
-      event.sender.send('backend-started', { success: true });
+      safeSend('backend-started', { success: true });
     } catch (err: any) {
       console.error(`[Backend Error] ${err.message}`);
-      event.sender.send('backend-started', { success: false, error: err.message });
+      safeSend('backend-started', { success: false, error: err.message });
     }
   });
 }
@@ -109,5 +120,3 @@ app.on('window-all-closed', () => {
     app.quit();
   }
 });
-
-

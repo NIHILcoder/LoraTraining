@@ -127,16 +127,6 @@ MODEL_CATALOG = [
         "filename": "stage_c_bf16.safetensors",
         "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c_bf16.safetensors",
     },
-    {
-        "id": "stable-cascade",
-        "name": "Stable Cascade (Stage C)",
-        "shortName": "Cascade",
-        "description": "Würstchen architecture. Extremely fast inference with compact latent space.",
-        "architecture": "cascade",
-        "fileSize": 9156923392,
-        "filename": "stage_c_bf16.safetensors",
-        "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c_bf16.safetensors",
-    },
 ]
 
 from typing import Optional, List
@@ -417,14 +407,16 @@ def _load_pipeline(model_path: str, lora_path: Optional[str], lora_weight: float
 
     if architecture in ("sdxl", "kolors"):
         pipe = StableDiffusionXLPipeline.from_single_file(
-            model_path, torch_dtype=dtype, use_safetensors=True, variant="fp16"
+            model_path, torch_dtype=dtype, use_safetensors=True, variant="fp16",
+            low_cpu_mem_usage=False,
         )
     else:
         pipe = StableDiffusionPipeline.from_single_file(
             model_path, torch_dtype=dtype, use_safetensors=True,
+            low_cpu_mem_usage=False,
         )
 
-    pipe = pipe.to(device)
+    pipe.to(device)
     pipe.enable_attention_slicing()
 
     try:
@@ -596,36 +588,7 @@ async def auto_caption(req: CaptionRequest):
         print("Captioning error:", e)
         return {"tags": ["error"]}
 
-class GenerateRequest(PydanticBase):
-    prompt: str
-    negativePrompt: str
-    width: int
-    height: int
-    seed: int
-    cfgScale: float
-    steps: int
-    loraWeight: Optional[float] = 1.0
-    sampler: Optional[str] = "Euler a"
 
-@app.post("/api/playground/generate")
-async def playground_generate(req: GenerateRequest):
-    await asyncio.sleep(2.0) # Simulate GPU Diffusers rendering latency
-    
-    import base64
-    svg = f"""<svg xmlns="http://www.w3.org/2000/svg" width="{req.width}" height="{req.height}">
-      <rect width="{req.width}" height="{req.height}" fill="#0A0A0A"/>
-      <path d="M0 0 L{req.width} {req.height} M{req.width} 0 L0 {req.height}" stroke="#333333" stroke-width="2" stroke-opacity="0.3"/>
-      <rect width="{req.width}" height="{req.height}" fill="none" stroke="#333333" stroke-width="8"/>
-      <text x="50%" y="42%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="sans-serif" font-size="24" font-weight="600">Simulated Inference</text>
-      <text x="50%" y="49%" dominant-baseline="middle" text-anchor="middle" fill="#888888" font-family="sans-serif" font-size="14">Prompt: {req.prompt[:40] + ('...' if len(req.prompt) > 40 else '')}</text>
-      <text x="50%" y="56%" dominant-baseline="middle" text-anchor="middle" fill="#00FF9D" font-family="monospace" font-size="14" font-weight="bold">LoRA Weight: {req.loraWeight} | {req.sampler}</text>
-      <text x="50%" y="62%" dominant-baseline="middle" text-anchor="middle" fill="#666666" font-family="monospace" font-size="12">Seed: {req.seed} | CFG: {req.cfgScale} | Steps: {req.steps}</text>
-    </svg>"""
-    
-    b64 = base64.b64encode(svg.encode('utf-8')).decode('utf-8')
-    data_url = f"data:image/svg+xml;base64,{b64}"
-    
-    return {"url": data_url, "seed": req.seed}
 
 @app.websocket("/ws/training")
 async def training_websocket(websocket: WebSocket):
