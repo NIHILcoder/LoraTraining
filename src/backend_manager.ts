@@ -4,7 +4,9 @@ import * as https from 'https';
 import { spawn } from 'child_process';
 import { app } from 'electron';
 
-const BACKEND_DIR = path.join(__dirname, '..', 'backend');
+const BACKEND_DIR = app.isPackaged 
+  ? path.join(process.resourcesPath, 'backend')
+  : path.join(__dirname, '..', 'backend');
 const ENV_DIR = path.join(BACKEND_DIR, 'env');
 const PYTHON_EXE = path.join(ENV_DIR, 'Scripts', 'python.exe');
 

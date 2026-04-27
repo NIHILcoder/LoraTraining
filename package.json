@@ -11,7 +11,7 @@
     "electron:start": "electron dist/main.js",
     "electron:build": "webpack --mode development --config-name electron",
     "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\"",
-    "electron:dist": "npm run build && npm run electron:build && electron-builder"
+    "electron:dist": "npm run build && npm run electron:build && npx electron-builder"
   },
   "build": {
     "appId": "com.lorastudio.app",
@@ -21,33 +21,48 @@
     },
     "files": [
       "dist/**/*",
-      "backend/**/*",
-      "!backend/env/**/*",
-      "!backend/.venv/**/*",
-      "!backend/output/**/*",
-      "!backend/generated/**/*",
-      "!backend/datasets/**/*",
       "public/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "backend",
+        "to": "backend",
+        "filter": [
+          "**/*",
+          "!env/**/*",
+          "!.venv/**/*",
+          "!output/**/*",
+          "!generated/**/*",
+          "!datasets/**/*",
+          "!__pycache__/**/*"
+        ]
+      }
     ],
     "win": {
       "target": "nsis",
-      "icon": "public/icon.ico"
+      "icon": "public/icon.ico",
+      "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
-      "oneClick": false,
-      "allowToChangeInstallationDirectory": true,
-      "createDesktopShortcut": true
+      "oneClick": true,
+      "allowToChangeInstallationDirectory": false,
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "LoRA Studio",
+      "installerIcon": "public/icon.ico",
+      "uninstallerIcon": "public/icon.ico",
+      "runAfterFinish": true,
+      "deleteAppDataOnUninstall": true
     }
   },
-  "dependencies": {
+  "dependencies": {},
+  "devDependencies": {
     "react": "^18.3.1",
     "react-dom": "^18.3.1",
     "react-router-dom": "^6.28.0",
     "recharts": "^2.13.3",
     "react-dropzone": "^14.3.5",
-    "lucide-react": "^0.460.0"
-  },
-  "devDependencies": {
+    "lucide-react": "^0.460.0",
     "@babel/core": "^7.26.0",
     "@babel/preset-env": "^7.26.0",
     "@babel/preset-react": "^7.25.9",
