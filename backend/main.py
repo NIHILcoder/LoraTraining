@@ -417,7 +417,44 @@ async def generate_image(req: GenerateRequest):
         # Save to disk and return as data URL
         img_id = str(uuid.uuid4())[:8]
         img_path = GENERATED_DIR / f"{img_id}.png"
+        meta_path = GENERATED_DIR / f"{img_id}.json"
+        
         result_image.save(str(img_path), "PNG")
+        
+        # Resolve names for metadata
+        lora_name = "None"
+        if req.loraModelId and req.loraModelId != "none":
+            lora_dir = get_output_dir() / req.loraModelId
+            safetensors = list(lora_dir.glob("*.safetensors"))
+            if safetensors:
+                lora_name = safetensors[0].stem.replace("_", " ").title()
+        
+        base_name = "Auto"
+        if req.baseModelId and req.baseModelId != "auto":
+            for m in MODEL_CATALOG:
+                if m["id"] == req.baseModelId:
+                    base_name = m["name"]
+                    break
+
+        # Save metadata for Gallery
+        image_meta = {
+            "id": img_id,
+            "prompt": req.prompt,
+            "negativePrompt": req.negativePrompt,
+            "seed": actual_seed,
+            "steps": req.steps,
+            "cfgScale": req.cfgScale,
+            "sampler": req.sampler,
+            "width": req.width,
+            "height": req.height,
+            "loraModelId": req.loraModelId,
+            "loraName": lora_name,
+            "loraWeight": req.loraWeight,
+            "baseModelId": req.baseModelId,
+            "baseModelName": base_name,
+            "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }
+        meta_path.write_text(json.dumps(image_meta, indent=2))
 
         buffered = io.BytesIO()
         result_image.save(buffered, format="PNG")
@@ -1335,9 +1372,15 @@ async def list_trained_models():
             except Exception:
                 pass
         
+        raw_name = lora_file.stem.replace("_", " ").replace("-", " ").title()
+        if raw_name == "Default Config" or raw_name == "Lora Output":
+            display_name = f"{raw_name} ({session_dir.name[:6]})"
+        else:
+            display_name = raw_name
+
         model_info = {
             "id": session_dir.name,
-            "name": lora_file.stem.replace("_", " ").replace("-", " ").title(),
+            "name": display_name,
             "filename": lora_file.name,
             "fileSize": file_size,
             "path": str(lora_file),
@@ -1395,6 +1438,65 @@ async def open_model_folder(model_id: str):
         return {"status": "opened"}
     except Exception as e:
         return {"error": f"Failed to open folder: {e}"}
+
+
+@app.get("/api/gallery/images")
+async def list_generated_images():
+    """Scan the generated directory for images and their metadata."""
+    images = []
+    if not GENERATED_DIR.exists():
+        return {"images": []}
+        
+    for img_file in sorted(GENERATED_DIR.glob("*.png"), key=os.path.getctime, reverse=True):
+        img_id = img_file.stem
+        meta_file = GENERATED_DIR / f"{img_id}.json"
+        
+        metadata = {}
+        if meta_file.exists():
+            try:
+                metadata = json.loads(meta_file.read_text())
+            except Exception:
+                pass
+        
+        # If no metadata, provide defaults
+        if not metadata:
+            metadata = {
+                "id": img_id,
+                "prompt": "",
+                "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(img_file.stat().st_ctime)),
+            }
+            
+        # Add file info
+        metadata["url"] = f"http://localhost:8000/api/generated/{img_id}.png"
+        metadata["path"] = str(img_file)
+        
+        images.append(metadata)
+        
+    return {"images": images}
+
+@app.delete("/api/gallery/images/{image_id}")
+async def delete_generated_image(image_id: str):
+    """Delete a generated image and its metadata."""
+    img_file = GENERATED_DIR / f"{image_id}.png"
+    meta_file = GENERATED_DIR / f"{image_id}.json"
+    
+    try:
+        if img_file.exists():
+            img_file.unlink()
+        if meta_file.exists():
+            meta_file.unlink()
+        return {"success": True}
+    except Exception as e:
+        return {"error": str(e)}
+
+@app.get("/api/generated/{filename}")
+async def get_generated_image(filename: str):
+    """Serve a generated image file."""
+    from fastapi.responses import FileResponse
+    file_path = GENERATED_DIR / filename
+    if not file_path.exists():
+        return {"error": "File not found"}
+    return FileResponse(str(file_path))
 
 
 # ============================================

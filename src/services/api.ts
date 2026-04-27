@@ -294,4 +294,18 @@ export async function openOutputDirectory(): Promise<void> {
   if (!response.ok) throw new Error('Failed to open output directory');
 }
 
+export async function fetchGeneratedImages(): Promise<any[]> {
+  const response = await fetch(`${API_BASE}/gallery/images`);
+  if (!response.ok) throw new Error('Failed to fetch generated images');
+  const data = await response.json();
+  return data.images;
+}
+
+export async function deleteGeneratedImage(id: string): Promise<void> {
+  const response = await fetch(`${API_BASE}/gallery/images/${id}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) throw new Error('Failed to delete generated image');
+}
+
 export { generateId };

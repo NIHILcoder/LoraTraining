@@ -150,7 +150,7 @@ export function HardwarePanel() {
             <span className="hw-panel__gpu-name">{gpu.available ? gpu.name : 'No GPU'}</span>
             <span className="hw-panel__gpu-vram">
               {gpu.available ? `${gpu.vram_gb} GB VRAM` : 'CPU Mode'}
-              {gpu.bf16_supported && <Badge variant="accent" size="sm" style={{ marginLeft: 6 }}>BF16</Badge>}
+              {gpu.bf16_supported && <span style={{ marginLeft: 6 }}><Badge variant="accent" size="sm">BF16</Badge></span>}
             </span>
           </div>
         </div>
