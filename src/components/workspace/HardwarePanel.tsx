@@ -38,7 +38,7 @@ interface EstimateData {
 }
 
 export function HardwarePanel() {
-  const { state } = useApp();
+  const { state, dispatch } = useApp();
   const config = state.trainingConfig;
 
   const [gpu, setGpu] = useState<GpuData | null>(null);
@@ -223,7 +223,9 @@ export function HardwarePanel() {
                 return (
                   <div
                     key={arch}
-                    className={`hw-compat-item ${isSelected ? 'hw-compat-item--selected' : ''} ${!profile.feasible ? 'hw-compat-item--disabled' : ''}`}
+                    className={`hw-compat-item ${isSelected ? 'hw-compat-item--selected' : ''}`}
+                    onClick={() => dispatch({ type: 'UPDATE_CONFIG', payload: { baseModel: arch as any } })}
+                    style={{ cursor: 'pointer' }}
                   >
                     <div className="hw-compat-item__top">
                       {profile.feasible ? (
