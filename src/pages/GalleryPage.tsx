@@ -458,7 +458,9 @@ export function GalleryPage() {
                     icon={<Trash2 size={14} />} 
                     className="gallery-delete-btn"
                     onClick={() => setDeleteImageTarget(img)}
-                  />
+                  >
+                    Delete
+                  </Button>
                 </div>
               </div>
             </Card>

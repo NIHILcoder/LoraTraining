@@ -6,12 +6,12 @@
   "main": "dist/main.js",
   "scripts": {
     "dev": "webpack serve --mode development",
-    "build": "webpack --mode production",
+    "build": "webpack --mode production --config-name web && webpack --mode production --config-name electron",
     "type-check": "tsc --noEmit",
     "electron:start": "electron dist/main.js",
     "electron:build": "webpack --mode development --config-name electron",
     "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\"",
-    "electron:dist": "npm run build && npm run electron:build && npx electron-builder"
+    "electron:dist": "npm run build && electron-builder"
   },
   "build": {
     "appId": "com.lorastudio.app",
@@ -21,20 +21,18 @@
     },
     "files": [
       "dist/**/*",
-      "public/**/*"
+      "public/**/*",
+      "!dist/release/**/*",
+      "!release/**/*"
     ],
     "extraResources": [
       {
         "from": "backend",
         "to": "backend",
         "filter": [
-          "**/*",
-          "!env/**/*",
-          "!.venv/**/*",
-          "!output/**/*",
-          "!generated/**/*",
-          "!datasets/**/*",
-          "!__pycache__/**/*"
+          "main.py",
+          "trainer.py",
+          "requirements.txt"
         ]
       }
     ],
@@ -44,13 +42,16 @@
       "requestedExecutionLevel": "asInvoker"
     },
     "nsis": {
-      "oneClick": true,
-      "allowToChangeInstallationDirectory": false,
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "LoRA Studio",
       "installerIcon": "public/icon.ico",
       "uninstallerIcon": "public/icon.ico",
+      "installerHeader": "installer-assets/installerHeader.bmp",
+      "installerSidebar": "installer-assets/installerSidebar.bmp",
+      "uninstallerSidebar": "installer-assets/uninstallerSidebar.bmp",
       "runAfterFinish": true,
       "deleteAppDataOnUninstall": true
     }

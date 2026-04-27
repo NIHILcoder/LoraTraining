@@ -1,5 +1,5 @@
 import React, { useEffect, useState } from 'react';
-import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, HashRouter, Routes, Route, Navigate } from 'react-router-dom';
 import { AppProvider } from './context/AppContext';
 import { Sidebar } from './components/layout/Sidebar';
 import { TrainingWorkspacePage } from './pages/TrainingWorkspacePage';
@@ -13,6 +13,8 @@ import { Cpu, AlertTriangle } from 'lucide-react';
 import './App.css';
 
 type AppState = 'checking' | 'needs_setup' | 'starting' | 'ready' | 'error';
+
+const Router = window.location.protocol === 'file:' ? HashRouter : BrowserRouter;
 
 export function App() {
   const [appState, setAppState] = useState<AppState>('checking');

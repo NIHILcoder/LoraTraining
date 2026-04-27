@@ -13,7 +13,7 @@ module.exports = (env, argv) => {
       path: path.resolve(__dirname, 'dist'),
       filename: isDev ? '[name].js' : '[name].[contenthash].js',
       clean: true,
-      publicPath: '/',
+      publicPath: isDev ? '/' : './',
     },
     resolve: {
       extensions: ['.tsx', '.ts', '.js', '.jsx'],
