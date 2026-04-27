@@ -10,7 +10,34 @@
     "type-check": "tsc --noEmit",
     "electron:start": "electron dist/main.js",
     "electron:build": "webpack --mode development --config-name electron",
-    "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\""
+    "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\"",
+    "electron:dist": "npm run build && npm run electron:build && electron-builder"
+  },
+  "build": {
+    "appId": "com.lorastudio.app",
+    "productName": "LoRA Studio",
+    "directories": {
+      "output": "dist/release"
+    },
+    "files": [
+      "dist/**/*",
+      "backend/**/*",
+      "!backend/env/**/*",
+      "!backend/.venv/**/*",
+      "!backend/output/**/*",
+      "!backend/generated/**/*",
+      "!backend/datasets/**/*",
+      "public/**/*"
+    ],
+    "win": {
+      "target": "nsis",
+      "icon": "public/icon.ico"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true
+    }
   },
   "dependencies": {
     "react": "^18.3.1",
@@ -38,6 +65,7 @@
     "webpack-dev-server": "^5.1.0",
     "electron": "^30.0.0",
     "concurrently": "^8.2.2",
-    "wait-on": "^7.2.0"
+    "wait-on": "^7.2.0",
+    "electron-builder": "^24.13.3"
   }
 }
