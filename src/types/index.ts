@@ -49,8 +49,8 @@ export interface Dataset {
 }
 
 // --- Training Configuration ---
-export type OptimizerType = 'AdamW' | 'Prodigy' | 'DAdaptAdam';
-export type SchedulerType = 'cosine' | 'linear' | 'constant' | 'cosine_with_restarts';
+export type OptimizerType = 'AdamW';
+export type SchedulerType = 'cosine' | 'constant';
 export type ResolutionType = 512 | 768 | 1024 | 1536;
 export type BaseModelType = 'sd15' | 'sd21' | 'sdxl' | 'sd3' | 'flux' | 'cascade';
 
@@ -86,7 +86,7 @@ export interface ConfigPreset {
 }
 
 // --- Training Status ---
-export type TrainingPhase = 'idle' | 'preparing' | 'training' | 'paused' | 'completed' | 'error';
+export type TrainingPhase = 'idle' | 'preparing' | 'training' | 'completed' | 'error';
 
 export interface TrainingStep {
   step: number;

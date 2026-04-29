@@ -6,25 +6,16 @@ export function TitleBar() {
   const [isMaximized, setIsMaximized] = useState(false);
 
   const handleMinimize = () => {
-    if (window.require) {
-      const { ipcRenderer } = window.require('electron');
-      ipcRenderer.send('window-min');
-    }
+    window.loraStudio?.windowMinimize();
   };
 
   const handleMaximize = () => {
-    if (window.require) {
-      const { ipcRenderer } = window.require('electron');
-      ipcRenderer.send('window-max');
-      setIsMaximized(!isMaximized);
-    }
+    window.loraStudio?.windowMaximize();
+    setIsMaximized(!isMaximized);
   };
 
   const handleClose = () => {
-    if (window.require) {
-      const { ipcRenderer } = window.require('electron');
-      ipcRenderer.send('window-close');
-    }
+    window.loraStudio?.windowClose();
   };
 
   return (

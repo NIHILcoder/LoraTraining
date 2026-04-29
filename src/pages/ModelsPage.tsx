@@ -27,6 +27,8 @@ import {
   deleteBaseModel,
   addCustomModel,
   setModelsDirectory,
+  getWsUrl,
+  getApiBase,
 } from '../services/api';
 import type { BaseModel } from '../types';
 import './ModelsPage.css';
@@ -52,7 +54,7 @@ export function ModelsPage() {
 
   // WebSocket for download progress
   useWebSocket({
-    url: 'ws://localhost:8000/ws/training',
+    url: getWsUrl('/ws/training'),
     onMessage: (msg) => {
       switch (msg.type) {
         case 'download_progress':
@@ -124,7 +126,7 @@ export function ModelsPage() {
     loadModels();
     
     // Fetch HF Token on mount
-    fetch('http://localhost:8000/api/settings/token')
+    fetch(getApiBase() + '/settings/token')
       .then(r => r.json())
       .then(d => {
         if (d.token) {
@@ -231,7 +233,7 @@ export function ModelsPage() {
   const handleSaveToken = async () => {
     setSavingToken(true);
     try {
-      await fetch('http://localhost:8000/api/settings/token', {
+      await fetch(getApiBase() + '/settings/token', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ token: hfToken }),
@@ -485,7 +487,7 @@ export function ModelsPage() {
             {showTokenEdit && !hfToken && (
               <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
                 <span style={{ color: 'var(--text-warning)' }}>⚠️ Token is required to download this model.</span>
-                <span><strong>Step 1:</strong> Go to <a href="#" onClick={(e) => { e.preventDefault(); window.require('electron').shell.openExternal('https://huggingface.co/settings/tokens') }} style={{ color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer' }}>HuggingFace Tokens page</a>.</span>
+                <span><strong>Step 1:</strong> Go to <a href="#" onClick={(e) => { e.preventDefault(); window.loraStudio?.openExternal('https://huggingface.co/settings/tokens') }} style={{ color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer' }}>HuggingFace Tokens page</a>.</span>
                 <span><strong>Step 2:</strong> Click "Create new token" (select "Read" permission).</span>
                 <span><strong>Step 3:</strong> Copy the generated token starting with <code>hf_...</code> and paste it here.</span>
               </div>

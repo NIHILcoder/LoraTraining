@@ -1,7 +1,7 @@
 import * as path from 'path';
 import * as fs from 'fs';
 import * as https from 'https';
-import { spawn } from 'child_process';
+import { spawn, execSync } from 'child_process';
 import { app } from 'electron';
 
 const BACKEND_DIR = app.isPackaged 
@@ -185,12 +185,17 @@ export async function installEnvironment(
   fs.writeFileSync(SETUP_MARKER, 'ready');
 
   onStep('Setup Complete!', 100);
-  onLog('✅ Setup Complete! Application is ready.');
+  onLog('Setup Complete! Application is ready.');
 }
 
 let backendProcess: ReturnType<typeof spawn> | null = null;
 
-export function startBackend(onLog: (msg: string) => void): Promise<void> {
+/**
+ * Start the Python backend server on the given port.
+ * P0-04: No longer kills arbitrary processes on port 8000.
+ * The caller provides a dynamically allocated free port.
+ */
+export function startBackend(onLog: (msg: string) => void, port: number = 8000): Promise<void> {
   return new Promise((resolve, reject) => {
     if (backendProcess) {
       resolve();
@@ -201,33 +206,18 @@ export function startBackend(onLog: (msg: string) => void): Promise<void> {
     
     // Ensure dependencies are up to date (fast if already installed)
     try {
-      const { execSync } = require('child_process');
       onLog('Checking dependencies...');
       execSync(`"${PYTHON_EXE}" -m pip install omegaconf`, { cwd: BACKEND_DIR });
     } catch (e) {
       onLog('Warning: Could not auto-update dependencies. Training might fail if omegaconf is missing.');
     }
-    
-    // Kill any process already using port 8000 (Windows)
-    try {
-      const { execSync } = require('child_process');
-      const output = execSync('netstat -ano | findstr :8000').toString();
-      const lines = output.trim().split('\n');
-      for (const line of lines) {
-        const parts = line.trim().split(/\s+/);
-        const pid = parts[parts.length - 1];
-        if (pid && !isNaN(parseInt(pid))) {
-          onLog(`Cleaning up port 8000 (PID: ${pid})...`);
-          execSync(`taskkill /F /PID ${pid} /T`);
-        }
-      }
-    } catch (e) {
-      // Port likely not in use, ignore
-    }
+
+    // P0-04: Removed netstat/taskkill port-killing logic.
+    // The port is now dynamically allocated in main.ts via findFreePort().
 
     backendProcess = spawn(
       `"${PYTHON_EXE}"`,
-      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', '8000'],
+      ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)],
       { cwd: BACKEND_DIR, shell: true }
     );
 

@@ -9,7 +9,34 @@ import type {
   TrainingConfig,
 } from '../types';
 
-const API_BASE = 'http://localhost:8000/api';
+// P0-04: Dynamic backend port — fetched from preload API at startup.
+// Falls back to 8000 for browser-only development mode.
+
+let _backendPort = 8000;
+let _portResolved = false;
+
+async function resolvePort(): Promise<number> {
+  if (_portResolved) return _backendPort;
+  try {
+    const port = await window.loraStudio?.getBackendPort();
+    if (port) _backendPort = port;
+  } catch (e) { /* browser-only mode — use default */ }
+  _portResolved = true;
+  return _backendPort;
+}
+
+/** Call once during app init to resolve the port early */
+export async function initApiPort(): Promise<void> {
+  await resolvePort();
+}
+
+export function getApiBase(): string {
+  return `http://localhost:${_backendPort}/api`;
+}
+
+export function getWsUrl(path: string): string {
+  return `ws://localhost:${_backendPort}${path}`;
+}
 
 // --- Helpers ---
 function generateId(): string {
@@ -102,7 +129,7 @@ export async function deleteImage(
 }
 
 export async function autoCaptionImage(imageId: string, imageUrl: string): Promise<string[]> {
-  const response = await fetch(`${API_BASE}/dataset/caption`, {
+  const response = await fetch(`${getApiBase()}/dataset/caption`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ imageId, imageUrl }),
@@ -125,7 +152,7 @@ export async function generateImage(params: {
   loraModelId?: string | null;
   baseModelId?: string | null;
 }): Promise<{url: string, seed: number, mock?: boolean, reason?: string}> {
-  const response = await fetch(`${API_BASE}/playground/generate`, {
+  const response = await fetch(`${getApiBase()}/playground/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -136,28 +163,28 @@ export async function generateImage(params: {
 
 export async function fetchAvailableBaseModels(): Promise<{ id: string; name: string; architecture: string; filename: string }[]> {
   // Returns only models that are actually downloaded (have a local file)
-  const res = await fetch(`${API_BASE}/models/base`);
+  const res = await fetch(`${getApiBase()}/models/base`);
   if (!res.ok) return [];
   const data = await res.json();
   return (data.models || []).filter((m: any) => m.status === 'downloaded');
 }
 
 export async function fetchModels(): Promise<any[]> {
-  const response = await fetch(`${API_BASE}/gallery/models`);
+  const response = await fetch(`${getApiBase()}/gallery/models`);
   if (!response.ok) throw new Error('Failed to fetch trained models');
   const data = await response.json();
   return data.models;
 }
 
 export async function deleteModel(modelId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/gallery/models/${modelId}`, {
+  const response = await fetch(`${getApiBase()}/gallery/models/${modelId}`, {
     method: 'DELETE',
   });
   if (!response.ok) throw new Error('Failed to delete model');
 }
 
 export async function openModelFolder(modelId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/gallery/models/${modelId}/open`, {
+  const response = await fetch(`${getApiBase()}/gallery/models/${modelId}/open`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to open folder');
@@ -167,7 +194,7 @@ export async function startTraining(
   config: TrainingConfig,
   images: { filePath?: string; captions?: string[] }[]
 ): Promise<{ sessionId?: string; error?: string }> {
-  const response = await fetch(`${API_BASE}/training/start`, {
+  const response = await fetch(`${getApiBase()}/training/start`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ config, images }),
@@ -177,7 +204,7 @@ export async function startTraining(
 }
 
 export async function fetchGpuInfo(): Promise<any> {
-  const response = await fetch(`${API_BASE}/gpu/info`);
+  const response = await fetch(`${getApiBase()}/gpu/info`);
   if (!response.ok) throw new Error('Failed to fetch GPU info');
   return response.json();
 }
@@ -189,7 +216,7 @@ export async function estimateTrainingTime(params: {
   resolution: number;
   batchSize: number;
 }): Promise<{ eta_seconds: number; time_per_step: number; feasible: boolean; reason: string | null }> {
-  const response = await fetch(`${API_BASE}/gpu/estimate`, {
+  const response = await fetch(`${getApiBase()}/gpu/estimate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
@@ -199,26 +226,25 @@ export async function estimateTrainingTime(params: {
 }
 
 export async function stopTraining(sessionId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/training/stop/${sessionId}`, {
+  const response = await fetch(`${getApiBase()}/training/stop/${sessionId}`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to stop training');
 }
 
-export async function pauseTraining(_sessionId: string): Promise<void> {
-  await delay(200);
-}
+// P1-04: pauseTraining removed — backend has no real pause/resume support.
+// Will be re-added when LoRATrainer implements thread-safe pause.
 
 // --- Base Model Management ---
 
 export async function fetchBaseModels(): Promise<{ models: any[]; modelsDirectory: string }> {
-  const response = await fetch(`${API_BASE}/models/base`);
+  const response = await fetch(`${getApiBase()}/models/base`);
   if (!response.ok) throw new Error('Failed to fetch base models');
   return response.json();
 }
 
 export async function downloadBaseModel(modelId: string): Promise<{ status: string }> {
-  const response = await fetch(`${API_BASE}/models/base/${modelId}/download`, {
+  const response = await fetch(`${getApiBase()}/models/base/${modelId}/download`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to start download');
@@ -226,14 +252,14 @@ export async function downloadBaseModel(modelId: string): Promise<{ status: stri
 }
 
 export async function cancelBaseModelDownload(modelId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/models/base/${modelId}/cancel`, {
+  const response = await fetch(`${getApiBase()}/models/base/${modelId}/cancel`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to cancel download');
 }
 
 export async function deleteBaseModel(modelId: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/models/base/${modelId}`, {
+  const response = await fetch(`${getApiBase()}/models/base/${modelId}`, {
     method: 'DELETE',
   });
   if (!response.ok) throw new Error('Failed to delete model');
@@ -244,7 +270,7 @@ export async function addCustomModel(
   name?: string,
   architecture?: string
 ): Promise<any> {
-  const response = await fetch(`${API_BASE}/models/base/custom`, {
+  const response = await fetch(`${getApiBase()}/models/base/custom`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ url, name, architecture }),
@@ -254,7 +280,7 @@ export async function addCustomModel(
 }
 
 export async function setModelsDirectory(path: string): Promise<{ modelsDirectory: string }> {
-  const response = await fetch(`${API_BASE}/models/directory`, {
+  const response = await fetch(`${getApiBase()}/models/directory`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -264,7 +290,7 @@ export async function setModelsDirectory(path: string): Promise<{ modelsDirector
 }
 
 export async function getModelsDirectory(): Promise<{ modelsDirectory: string }> {
-  const response = await fetch(`${API_BASE}/models/directory`);
+  const response = await fetch(`${getApiBase()}/models/directory`);
   if (!response.ok) throw new Error('Failed to get models directory');
   return response.json();
 }
@@ -272,13 +298,13 @@ export async function getModelsDirectory(): Promise<{ modelsDirectory: string }>
 // --- Output Directory Management ---
 
 export async function fetchOutputDirectory(): Promise<{ outputDirectory: string }> {
-  const response = await fetch(`${API_BASE}/output/directory`);
+  const response = await fetch(`${getApiBase()}/output/directory`);
   if (!response.ok) throw new Error('Failed to get output directory');
   return response.json();
 }
 
 export async function setOutputDirectory(path: string): Promise<{ outputDirectory: string }> {
-  const response = await fetch(`${API_BASE}/output/directory`, {
+  const response = await fetch(`${getApiBase()}/output/directory`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ path }),
@@ -288,21 +314,21 @@ export async function setOutputDirectory(path: string): Promise<{ outputDirector
 }
 
 export async function openOutputDirectory(): Promise<void> {
-  const response = await fetch(`${API_BASE}/output/open`, {
+  const response = await fetch(`${getApiBase()}/output/open`, {
     method: 'POST',
   });
   if (!response.ok) throw new Error('Failed to open output directory');
 }
 
 export async function fetchGeneratedImages(): Promise<any[]> {
-  const response = await fetch(`${API_BASE}/gallery/images`);
+  const response = await fetch(`${getApiBase()}/gallery/images`);
   if (!response.ok) throw new Error('Failed to fetch generated images');
   const data = await response.json();
   return data.images;
 }
 
 export async function deleteGeneratedImage(id: string): Promise<void> {
-  const response = await fetch(`${API_BASE}/gallery/images/${id}`, {
+  const response = await fetch(`${getApiBase()}/gallery/images/${id}`, {
     method: 'DELETE',
   });
   if (!response.ok) throw new Error('Failed to delete generated image');

@@ -60,7 +60,7 @@ const presets: ConfigPreset[] = [
       loraRank: 8,
       networkAlpha: 4,
       batchSize: 2,
-      optimizer: 'Prodigy',
+      optimizer: 'AdamW',
       scheduler: 'constant',
     },
   },
@@ -379,10 +379,8 @@ export function ConfigPage() {
                 value={config.optimizer}
                 options={[
                   { value: 'AdamW', label: 'AdamW' },
-                  { value: 'Prodigy', label: 'Prodigy (Adaptive)' },
-                  { value: 'DAdaptAdam', label: 'D-Adapt Adam' },
                 ]}
-                tooltip="Optimizer algorithm. AdamW is most common; Prodigy auto-tunes LR."
+                tooltip="Optimizer algorithm."
                 onChange={(v) => updateConfig({ optimizer: v as OptimizerType })}
               />
               <ParamSelect
@@ -390,9 +388,7 @@ export function ConfigPage() {
                 value={config.scheduler}
                 options={[
                   { value: 'cosine', label: 'Cosine Annealing' },
-                  { value: 'linear', label: 'Linear Decay' },
                   { value: 'constant', label: 'Constant' },
-                  { value: 'cosine_with_restarts', label: 'Cosine w/ Restarts' },
                 ]}
                 tooltip="How learning rate changes during training."
                 onChange={(v) => updateConfig({ scheduler: v as SchedulerType })}

@@ -10,6 +10,7 @@ import { TitleBar } from './components/layout/TitleBar';
 import { SetupScreen } from './components/setup/SetupScreen';
 import { Card } from './components/ui/Card';
 import { Cpu, AlertTriangle } from 'lucide-react';
+import { initApiPort } from './services/api';
 import './App.css';
 
 type AppState = 'checking' | 'needs_setup' | 'starting' | 'ready' | 'error';
@@ -21,8 +22,8 @@ export function App() {
   const [errorMsg, setErrorMsg] = useState('');
 
   useEffect(() => {
-    const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-    if (!ipcRenderer) {
+    const api = window.loraStudio;
+    if (!api) {
       // Running in browser mode (dev without electron)
       setAppState('ready');
       return;
@@ -30,19 +31,22 @@ export function App() {
 
     const init = async () => {
       try {
-        const envExists = await ipcRenderer.invoke('check-env');
+        const envExists = await api.checkEnv();
         if (!envExists) {
           setAppState('needs_setup');
         } else {
           setAppState('starting');
-          ipcRenderer.once('backend-started', (_e: any, res: any) => {
-            if (res.success) setAppState('ready');
+          api.once('backend-started', async (res: any) => {
+            if (res.success) {
+              await initApiPort(); // Resolve dynamic backend port before any API calls
+              setAppState('ready');
+            }
             else {
               setAppState('error');
               setErrorMsg(res.error || 'Failed to start AI Server');
             }
           });
-          ipcRenderer.send('start-backend');
+          api.startBackend();
         }
       } catch (err: any) {
         setAppState('error');

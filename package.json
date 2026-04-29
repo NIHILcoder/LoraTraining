@@ -6,10 +6,10 @@
   "main": "dist/main.js",
   "scripts": {
     "dev": "webpack serve --mode development",
-    "build": "webpack --mode production --config-name web && webpack --mode production --config-name electron",
+    "build": "webpack --mode production --config-name web && webpack --mode production --config-name electron && webpack --mode production --config-name preload",
     "type-check": "tsc --noEmit",
     "electron:start": "electron dist/main.js",
-    "electron:build": "webpack --mode development --config-name electron",
+    "electron:build": "webpack --mode development --config-name electron && webpack --mode development --config-name preload",
     "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\"",
     "electron:dist": "npm run build && electron-builder"
   },

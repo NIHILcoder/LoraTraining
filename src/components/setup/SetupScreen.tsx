@@ -24,25 +24,25 @@ export function SetupScreen({ onComplete }: { onComplete: () => void }) {
   }, [logs]);
 
   useEffect(() => {
-    const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-    if (!ipcRenderer) return;
+    const api = window.loraStudio;
+    if (!api) return;
 
-    ipcRenderer.on('install-log', (_e: any, msg: string) => addLog(msg.trim()));
-    ipcRenderer.on('install-progress', (_e: any, pct: number) => setProgress(pct));
-    ipcRenderer.on('install-step', (_e: any, stepName: string) => setCurrentStep(stepName));
-    ipcRenderer.on('backend-log', (_e: any, msg: string) => addLog(msg.trim()));
+    api.on('install-log', (msg: string) => addLog(msg.trim()));
+    api.on('install-progress', (pct: number) => setProgress(pct));
+    api.on('install-step', (stepName: string) => setCurrentStep(stepName));
+    api.on('backend-log', (msg: string) => addLog(msg.trim()));
 
     return () => {
-      ipcRenderer.removeAllListeners('install-log');
-      ipcRenderer.removeAllListeners('install-progress');
-      ipcRenderer.removeAllListeners('install-step');
-      ipcRenderer.removeAllListeners('backend-log');
+      api.removeAllListeners('install-log');
+      api.removeAllListeners('install-progress');
+      api.removeAllListeners('install-step');
+      api.removeAllListeners('backend-log');
     };
   }, []);
 
   const handleInstall = async () => {
-    const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-    if (!ipcRenderer) {
+    const api = window.loraStudio;
+    if (!api) {
       addLog('Error: Electron IPC not found.');
       setStatus('error');
       return;
@@ -53,13 +53,13 @@ export function SetupScreen({ onComplete }: { onComplete: () => void }) {
     setCurrentStep('Initializing Setup...');
     setLogs(['Starting automatic environment setup...']);
 
-    ipcRenderer.once('install-complete', (_e: any, result: any) => {
+    api.once('install-complete', (result: any) => {
       if (result.success) {
         addLog('Environment installed successfully. Starting backend server...');
         setStatus('starting');
         setCurrentStep('Booting up AI Server...');
         setProgress(100);
-        ipcRenderer.send('start-backend');
+        api.startBackend();
       } else {
         setStatus('error');
         setErrorMsg(result.error || 'Unknown installation error');
@@ -67,14 +67,14 @@ export function SetupScreen({ onComplete }: { onComplete: () => void }) {
       }
     });
 
-    ipcRenderer.send('install-env');
+    api.installEnv();
   };
 
   useEffect(() => {
-    const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-    if (!ipcRenderer) return;
+    const api = window.loraStudio;
+    if (!api) return;
 
-    const onBackendStarted = (_e: any, result: any) => {
+    const onBackendStarted = (result: any) => {
       if (result.success) {
         onComplete();
       } else {
@@ -84,9 +84,9 @@ export function SetupScreen({ onComplete }: { onComplete: () => void }) {
       }
     };
 
-    ipcRenderer.on('backend-started', onBackendStarted);
+    api.on('backend-started', onBackendStarted);
     return () => {
-      ipcRenderer.removeAllListeners('backend-started');
+      api.removeAllListeners('backend-started');
     };
   }, [onComplete]);
 

@@ -23,7 +23,7 @@ const presets: ConfigPreset[] = [
   },
   {
     id: 'fast', name: 'Fast', description: 'Quick iteration', icon: 'zap',
-    config: { learningRate: 2e-4, trainingSteps: 500, loraRank: 8, networkAlpha: 4, batchSize: 2, optimizer: 'Prodigy', scheduler: 'constant' },
+    config: { learningRate: 2e-4, trainingSteps: 500, loraRank: 8, networkAlpha: 4, batchSize: 2, optimizer: 'AdamW', scheduler: 'constant' },
   },
 ];
 
@@ -216,8 +216,6 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
             <ParamSelect label="Optimizer" value={config.optimizer}
               options={[
                 { value: 'AdamW', label: 'AdamW' },
-                { value: 'Prodigy', label: 'Prodigy' },
-                { value: 'DAdaptAdam', label: 'D-Adapt Adam' },
               ]}
               tooltip="Optimizer algorithm"
               onChange={(v) => updateConfig({ optimizer: v as OptimizerType })}
@@ -225,9 +223,7 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
             <ParamSelect label="LR Scheduler" value={config.scheduler}
               options={[
                 { value: 'cosine', label: 'Cosine' },
-                { value: 'linear', label: 'Linear' },
                 { value: 'constant', label: 'Constant' },
-                { value: 'cosine_with_restarts', label: 'Cosine w/ Restarts' },
               ]}
               tooltip="How LR changes during training"
               onChange={(v) => updateConfig({ scheduler: v as SchedulerType })}

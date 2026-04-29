@@ -27,7 +27,7 @@ import { fetchModels, deleteModel, openModelFolder, fetchOutputDirectory, setOut
 import './GalleryPage.css';
 
 // Electron IPC for native folder picker
-const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
+// P0-01: Uses window.loraStudio preload API instead of direct electron require
 
 interface TrainedModel {
   id: string;
@@ -149,9 +149,9 @@ export function GalleryPage() {
     try {
       let selectedPath: string | null = null;
 
-      if (ipcRenderer) {
-        // Native Electron folder picker
-        selectedPath = await ipcRenderer.invoke('select-directory', 'Select Output Directory for Trained Models');
+      if (window.loraStudio) {
+        // Native Electron folder picker via preload API
+        selectedPath = await window.loraStudio.selectDirectory('Select Output Directory for Trained Models');
       } else {
         // Fallback: prompt
         selectedPath = prompt('Enter the output directory path:', outputDir);

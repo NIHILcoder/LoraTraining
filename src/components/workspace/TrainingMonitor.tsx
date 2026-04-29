@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Play,
   Square,
-  Pause,
   Terminal,
   Activity,
   Clock,
@@ -21,7 +20,7 @@ import { ProgressBar } from '../ui/ProgressBar';
 import { Modal } from '../ui/Modal';
 import { useApp } from '../../context/AppContext';
 import { useWebSocket } from '../../hooks/useWebSocket';
-import { startTraining, stopTraining, pauseTraining } from '../../services/api';
+import { startTraining, stopTraining, getWsUrl } from '../../services/api';
 import { HardwarePanel } from './HardwarePanel';
 
 interface TrainingMonitorProps {
@@ -45,7 +44,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   const [copied, setCopied] = useState(false);
 
   const { isConnected, send } = useWebSocket({
-    url: 'ws://localhost:8000/ws/training',
+    url: getWsUrl('/ws/training'),
     onMessage: (msg) => {
       // Use ref (not state) to avoid stale closure bug
       if (isStoppingRef.current) return;
@@ -69,23 +68,21 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
     }
   }, [status.logs]);
 
-  // OS-level progress bar
+  // OS-level progress bar via preload API
   useEffect(() => {
-    try {
-      const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-      if (!ipcRenderer) return;
-      if (status.phase === 'training' && status.totalSteps > 0) {
-        ipcRenderer.send('set-progress-bar', status.currentStep / status.totalSteps);
-      } else if (status.phase === 'completed') {
-        ipcRenderer.send('set-progress-bar', -1);
-        ipcRenderer.send('show-notification', 'Training Complete', 'Your LoRA model has finished training!');
-      } else if (status.phase === 'error') {
-        ipcRenderer.send('set-progress-bar', -1);
-        ipcRenderer.send('show-notification', 'Training Error', 'An error interrupted training.');
-      } else if (status.phase === 'idle' || status.phase === 'paused') {
-        ipcRenderer.send('set-progress-bar', -1);
-      }
-    } catch (e) { /* not electron */ }
+    const api = window.loraStudio;
+    if (!api) return;
+    if (status.phase === 'training' && status.totalSteps > 0) {
+      api.setProgressBar(status.currentStep / status.totalSteps);
+    } else if (status.phase === 'completed') {
+      api.setProgressBar(-1);
+      api.showNotification('Training Complete', 'Your LoRA model has finished training!');
+    } else if (status.phase === 'error') {
+      api.setProgressBar(-1);
+      api.showNotification('Training Error', 'An error interrupted training.');
+    } else if (status.phase === 'idle') {
+      api.setProgressBar(-1);
+    }
   }, [status.phase, status.currentStep, status.totalSteps]);
 
   useEffect(() => {
@@ -93,8 +90,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   }, [isConnected, dispatch]);
 
   const isTraining = status.phase === 'training' || status.phase === 'preparing';
-  const isPaused = status.phase === 'paused';
-  const isActive = isTraining || isPaused || status.phase === 'completed' || status.phase === 'error';
+  const isActive = isTraining || status.phase === 'completed' || status.phase === 'error';
 
   // Notify parent of training state
   useEffect(() => {
@@ -126,13 +122,8 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
     }
   };
 
-  const handlePause = async () => {
-    if (!sessionId) return;
-    try {
-      await pauseTraining(sessionId);
-      dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'paused' } });
-    } catch (err) { console.error(err); }
-  };
+  // P1-04: Pause/resume removed — no real backend support exists.
+  // Will be re-added when the trainer implements thread-safe pause.
 
   const handleStopClick = () => {
     if (!sessionId) return;
@@ -160,16 +151,6 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
       const time = new Date(log.timestamp).toLocaleTimeString([], { hour12: false, hour: '2-digit', minute: '2-digit', second: '2-digit' });
       return `[${time}] ${log.message}`;
     }).join('\n');
-    
-    try {
-      const electron = (window as any).require?.('electron');
-      if (electron?.clipboard) {
-        electron.clipboard.writeText(logText);
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2000);
-        return;
-      }
-    } catch (e) { /* fallback to navigator */ }
 
     navigator.clipboard.writeText(logText).then(() => {
       setCopied(true);
@@ -198,24 +179,14 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
           Training Monitor
         </h2>
         <div style={{ display: 'flex', gap: 'var(--space-2)' }}>
-          {(!isTraining && !isPaused) ? (
+          {!isTraining ? (
             <Button variant="primary" icon={<Play size={16} />} onClick={handleStart} disabled={!dataset}>
               Start Training
             </Button>
           ) : (
-            <>
-              <Button
-                variant={isPaused ? 'primary' : 'secondary'}
-                icon={isPaused ? <Play size={16} /> : <Pause size={16} />}
-                onClick={isPaused ? handleStart : handlePause}
-                disabled={isStopping}
-              >
-                {isPaused ? 'Resume' : 'Pause'}
-              </Button>
-              <Button variant="danger" icon={<Square size={16} />} onClick={handleStopClick} disabled={isStopping}>
-                {isStopping ? 'Stopping...' : 'Stop'}
-              </Button>
-            </>
+            <Button variant="danger" icon={<Square size={16} />} onClick={handleStopClick} disabled={isStopping}>
+              {isStopping ? 'Stopping...' : 'Stop'}
+            </Button>
           )}
         </div>
       </div>
@@ -244,8 +215,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
                   variant={
                     status.phase === 'training' ? 'accent' :
                     status.phase === 'completed' ? 'success' :
-                    status.phase === 'error' ? 'error' :
-                    status.phase === 'paused' ? 'warning' : 'default'
+                    status.phase === 'error' ? 'error' : 'default'
                   }
                   dot={status.phase === 'training'}
                 >

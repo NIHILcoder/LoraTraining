@@ -7,7 +7,7 @@ module.exports = (env, argv) => {
 
   const webConfig = {
     name: 'web',
-    target: 'electron-renderer',
+    target: 'web',
     entry: { renderer: './src/index.tsx' },
     output: {
       path: path.resolve(__dirname, 'dist'),
@@ -93,10 +93,35 @@ module.exports = (env, argv) => {
     },
   };
 
+  // P0-01: Preload script — runs in its own isolated context
+  const preloadConfig = {
+    name: 'preload',
+    target: 'electron-preload',
+    entry: './src/preload.ts',
+    output: {
+      path: path.resolve(__dirname, 'dist'),
+      filename: 'preload.js',
+      clean: false,
+    },
+    resolve: {
+      extensions: ['.ts', '.js'],
+    },
+    module: {
+      rules: [
+        {
+          test: /\.ts$/,
+          exclude: /node_modules/,
+          use: 'babel-loader',
+        },
+      ],
+    },
+    devtool: isDev ? 'eval-source-map' : 'source-map',
+  };
+
   if (process.env.WEBPACK_SERVE) {
     webConfig.output.clean = false; // Prevent it from deleting main.js
     return webConfig;
   }
 
-  return [webConfig, electronConfig];
+  return [webConfig, electronConfig, preloadConfig];
 };

@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import {
   Play,
   Square,
-  Pause,
   Terminal,
   Activity,
   Clock,
@@ -25,7 +24,7 @@ import { ProgressBar } from '../components/ui/ProgressBar';
 import { Modal } from '../components/ui/Modal';
 import { useApp } from '../context/AppContext';
 import { useWebSocket } from '../hooks/useWebSocket';
-import { startTraining, stopTraining, pauseTraining } from '../services/api';
+import { startTraining, stopTraining, getWsUrl } from '../services/api';
 import './TrainingPage.css';
 
 export function TrainingPage() {
@@ -42,7 +41,7 @@ export function TrainingPage() {
 
   // WebSocket for live updates
   const { isConnected, send } = useWebSocket({
-    url: 'ws://localhost:8000/ws/training',
+    url: getWsUrl('/ws/training'),
     onMessage: (msg) => {
       switch (msg.type) {
         case 'training_update':
@@ -65,25 +64,21 @@ export function TrainingPage() {
     }
   }, [status.logs]);
 
-  // Sync OS level Progress Bar and Notifications
+  // Sync OS level Progress Bar and Notifications via preload API
   useEffect(() => {
-    try {
-      const ipcRenderer = (window as any).require?.('electron')?.ipcRenderer;
-      if (!ipcRenderer) return;
+    const api = window.loraStudio;
+    if (!api) return;
 
-      if (status.phase === 'training' && status.totalSteps > 0) {
-        ipcRenderer.send('set-progress-bar', status.currentStep / status.totalSteps);
-      } else if (status.phase === 'completed') {
-        ipcRenderer.send('set-progress-bar', -1);
-        ipcRenderer.send('show-notification', 'Training Complete', 'Your LoRA model has successfully finished training!');
-      } else if (status.phase === 'error') {
-        ipcRenderer.send('set-progress-bar', -1);
-        ipcRenderer.send('show-notification', 'Training Error', 'An error interrupted your training process.');
-      } else if (status.phase === 'idle' || status.phase === 'paused') {
-        ipcRenderer.send('set-progress-bar', -1);
-      }
-    } catch (e) {
-      // Not running in electron or require not available
+    if (status.phase === 'training' && status.totalSteps > 0) {
+      api.setProgressBar(status.currentStep / status.totalSteps);
+    } else if (status.phase === 'completed') {
+      api.setProgressBar(-1);
+      api.showNotification('Training Complete', 'Your LoRA model has successfully finished training!');
+    } else if (status.phase === 'error') {
+      api.setProgressBar(-1);
+      api.showNotification('Training Error', 'An error interrupted your training process.');
+    } else if (status.phase === 'idle') {
+      api.setProgressBar(-1);
     }
   }, [status.phase, status.currentStep, status.totalSteps]);
 
@@ -146,18 +141,8 @@ export function TrainingPage() {
     }
   };
 
-  const handlePause = async () => {
-    if (!sessionId) return;
-    try {
-      await pauseTraining(sessionId);
-      dispatch({
-        type: 'SET_TRAINING_STATUS',
-        payload: { phase: 'paused' },
-      });
-    } catch (err) {
-      console.error(err);
-    }
-  };
+  // P1-04: Pause/resume removed — no real backend support exists.
+  // Will be re-added when the trainer implements thread-safe pause.
 
   const handleStopClick = () => {
     if (!sessionId) return;
@@ -190,7 +175,6 @@ export function TrainingPage() {
   };
 
   const isTraining = status.phase === 'training' || status.phase === 'preparing';
-  const isPaused = status.phase === 'paused';
   const progressPercent = status.totalSteps > 0 ? (status.currentStep / status.totalSteps) * 100 : 0;
 
   return (
@@ -200,7 +184,7 @@ export function TrainingPage() {
         subtitle="Monitor training progress in real-time"
         actions={
           <>
-            {(!isTraining && !isPaused) ? (
+            {!isTraining ? (
               <Button
                 variant="primary"
                 icon={<Play size={16} />}
@@ -210,22 +194,13 @@ export function TrainingPage() {
                 Start Training
               </Button>
             ) : (
-              <>
-                <Button
-                  variant={isPaused ? "primary" : "secondary"}
-                  icon={isPaused ? <Play size={16} /> : <Pause size={16} />}
-                  onClick={isPaused ? handleStart : handlePause}
-                >
-                  {isPaused ? 'Resume' : 'Pause'}
-                </Button>
-                <Button
-                  variant="danger"
-                  icon={<Square size={16} />}
-                  onClick={handleStopClick}
-                >
-                  Stop
-                </Button>
-              </>
+              <Button
+                variant="danger"
+                icon={<Square size={16} />}
+                onClick={handleStopClick}
+              >
+                Stop
+              </Button>
             )}
           </>
         }
@@ -242,8 +217,7 @@ export function TrainingPage() {
                   variant={
                     status.phase === 'training' ? 'accent' :
                     status.phase === 'completed' ? 'success' :
-                    status.phase === 'error' ? 'error' :
-                    status.phase === 'paused' ? 'warning' : 'default'
+                    status.phase === 'error' ? 'error' : 'default'
                   }
                   dot={status.phase === 'training'}
                 >

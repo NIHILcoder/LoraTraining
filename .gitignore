@@ -72,3 +72,4 @@ logs/
 *.sw?
 .DS_Store
 Thumbs.db
+docs/technical-debt-plan.md
