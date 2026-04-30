@@ -73,3 +73,4 @@ logs/
 .DS_Store
 Thumbs.db
 docs/technical-debt-plan.md
+backend/docs/technical-debt-plan.md

@@ -26,8 +26,9 @@ interface LoraStudioAPI {
   // File Dialogs
   selectDirectory: (title?: string) => Promise<string | null>;
 
-  // Backend Port
+  // Backend Port & Token
   getBackendPort: () => Promise<number>;
+  getBackendToken: () => Promise<string>;
 
   // Event Listeners
   on: (channel: string, callback: IpcCallback) => any;

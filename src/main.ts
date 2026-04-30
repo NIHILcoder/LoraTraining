@@ -1,8 +1,13 @@
 import { app, BrowserWindow, ipcMain, Notification, dialog, shell } from 'electron';
 import * as path from 'path';
 import * as net from 'net';
+import * as crypto from 'crypto';
 
 import { checkEnvExists, installEnvironment, startBackend, stopBackend } from './backend_manager';
+
+// P0-02: Generate a strong random token per session to secure the local backend
+const backendApiToken = crypto.randomBytes(32).toString('hex');
+
 
 /**
  * Find a free TCP port starting from `preferred`.
@@ -98,6 +103,7 @@ function createWindow() {
   // Backend Setup IPC — handle must be removed before re-registering
   ipcMain.removeHandler('check-env');
   ipcMain.removeHandler('get-backend-port');
+  ipcMain.removeHandler('get-backend-token');
   ipcMain.removeHandler('select-directory');
   ipcMain.removeHandler('open-external');
 
@@ -105,6 +111,9 @@ function createWindow() {
 
   // P0-04: Return dynamic backend port to renderer via preload
   ipcMain.handle('get-backend-port', () => backendPort);
+
+  // P0-02: Return the session's API token to the renderer
+  ipcMain.handle('get-backend-token', () => backendApiToken);
 
   // Shell — open external URLs in default browser
   ipcMain.handle('open-external', (_event, url: string) => {
@@ -140,7 +149,7 @@ function createWindow() {
       await startBackend((msg) => {
         console.log(`[Backend] ${msg}`);
         safeSend('backend-log', msg);
-      }, backendPort);
+      }, backendPort, backendApiToken);
       safeSend('backend-started', { success: true, port: backendPort });
     } catch (err: any) {
       console.error(`[Backend Error] ${err.message}`);

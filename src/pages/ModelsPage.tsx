@@ -28,7 +28,8 @@ import {
   addCustomModel,
   setModelsDirectory,
   getWsUrl,
-  getApiBase,
+  getHfToken,
+  setHfToken,
 } from '../services/api';
 import type { BaseModel } from '../types';
 import './ModelsPage.css';
@@ -126,10 +127,9 @@ export function ModelsPage() {
     loadModels();
     
     // Fetch HF Token on mount
-    fetch(getApiBase() + '/settings/token')
-      .then(r => r.json())
+    getHfToken()
       .then(d => {
-        if (d.token) {
+        if (d.hasToken) {
           setHfToken(d.token);
         }
       })
@@ -233,11 +233,7 @@ export function ModelsPage() {
   const handleSaveToken = async () => {
     setSavingToken(true);
     try {
-      await fetch(getApiBase() + '/settings/token', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ token: hfToken }),
-      });
+      await setHfToken(hfToken);
       setShowTokenEdit(false);
     } catch (err) {
       console.error('Failed to save token:', err);

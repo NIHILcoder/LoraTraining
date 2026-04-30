@@ -7,12 +7,14 @@ import { app } from 'electron';
 const BACKEND_DIR = app.isPackaged 
   ? path.join(process.resourcesPath, 'backend')
   : path.join(__dirname, '..', 'backend');
-const ENV_DIR = path.join(BACKEND_DIR, 'env');
+
+const USER_DATA_DIR = app.getPath('userData');
+const ENV_DIR = path.join(USER_DATA_DIR, 'backend-env');
 const PYTHON_EXE = path.join(ENV_DIR, 'Scripts', 'python.exe');
 
 const UV_URL = 'https://github.com/astral-sh/uv/releases/latest/download/uv-x86_64-pc-windows-msvc.zip';
-const UV_ZIP = path.join(BACKEND_DIR, `uv-${Date.now()}.zip`);
-const UV_EXE = path.join(BACKEND_DIR, 'uv.exe');
+const UV_ZIP = path.join(USER_DATA_DIR, `uv-${Date.now()}.zip`);
+const UV_EXE = path.join(USER_DATA_DIR, 'uv.exe');
 
 const SETUP_MARKER = path.join(ENV_DIR, '.setup_complete');
 
@@ -86,16 +88,13 @@ export async function installEnvironment(
   onProgress: (pct: number) => void,
   onStep: (stepName: string, baseProgress: number) => void
 ): Promise<void> {
-  if (!fs.existsSync(BACKEND_DIR)) {
-    fs.mkdirSync(BACKEND_DIR, { recursive: true });
-  }
+  if (!fs.existsSync(BACKEND_DIR)) fs.mkdirSync(BACKEND_DIR, { recursive: true });
+  if (!fs.existsSync(USER_DATA_DIR)) fs.mkdirSync(USER_DATA_DIR, { recursive: true });
 
   // Force kill any orphaned uv.exe processes from previous interrupted installs
   try {
-    await runCommand('taskkill', ['/F', '/IM', 'uv.exe', '/T'], BACKEND_DIR, () => {});
-  } catch (e) {
-    // Ignore error if process is not found
-  }
+    await runCommand('taskkill', ['/F', '/IM', 'uv.exe', '/T'], USER_DATA_DIR, () => {});
+  } catch (e) {}
 
   // Ensure clean slate if previous install was aborted
   if (fs.existsSync(ENV_DIR)) {
@@ -108,10 +107,10 @@ export async function installEnvironment(
   }
 
   try {
-    const files = fs.readdirSync(BACKEND_DIR);
+    const files = fs.readdirSync(USER_DATA_DIR);
     for (const f of files) {
       if (f.startsWith('uv-') && f.endsWith('.zip')) {
-        try { fs.unlinkSync(path.join(BACKEND_DIR, f)); } catch (e) {}
+        try { fs.unlinkSync(path.join(USER_DATA_DIR, f)); } catch (e) {}
       }
     }
     try { fs.unlinkSync(UV_EXE); } catch (e) {}
@@ -128,8 +127,8 @@ export async function installEnvironment(
   onLog('Extracting uv...');
   await runCommand(
     'powershell',
-    ['-Command', `Expand-Archive -Path '${UV_ZIP}' -DestinationPath '${BACKEND_DIR}' -Force`],
-    BACKEND_DIR,
+    ['-Command', `Expand-Archive -Path '${UV_ZIP}' -DestinationPath '${USER_DATA_DIR}' -Force`],
+    USER_DATA_DIR,
     onLog
   );
   onLog('Extracted successfully.\n');
@@ -139,8 +138,8 @@ export async function installEnvironment(
   onLog('Creating Python 3.12 environment...');
   await runCommand(
     UV_EXE,
-    ['venv', '--python', '3.12', 'env', '--clear'],
-    BACKEND_DIR,
+    ['venv', '--python', '3.12', ENV_DIR, '--clear'],
+    USER_DATA_DIR,
     onLog
   );
   onLog('Environment created successfully.\n');
@@ -193,9 +192,9 @@ let backendProcess: ReturnType<typeof spawn> | null = null;
 /**
  * Start the Python backend server on the given port.
  * P0-04: No longer kills arbitrary processes on port 8000.
- * The caller provides a dynamically allocated free port.
+ * The caller provides a dynamically allocated free port and an API token.
  */
-export function startBackend(onLog: (msg: string) => void, port: number = 8000): Promise<void> {
+export function startBackend(onLog: (msg: string) => void, port: number = 8000, token: string = ''): Promise<void> {
   return new Promise((resolve, reject) => {
     if (backendProcess) {
       resolve();
@@ -215,10 +214,16 @@ export function startBackend(onLog: (msg: string) => void, port: number = 8000):
     // P0-04: Removed netstat/taskkill port-killing logic.
     // The port is now dynamically allocated in main.ts via findFreePort().
 
+    const envVars = {
+      ...process.env,
+      LORA_STUDIO_API_TOKEN: token,
+      LORA_STUDIO_USER_DATA: USER_DATA_DIR,
+    };
+
     backendProcess = spawn(
       `"${PYTHON_EXE}"`,
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)],
-      { cwd: BACKEND_DIR, shell: true }
+      { cwd: BACKEND_DIR, env: envVars, shell: true }
     );
 
     let isStarted = false;

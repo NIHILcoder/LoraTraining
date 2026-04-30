@@ -7,7 +7,8 @@ import json
 import shutil
 import aiofiles
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBase
 
@@ -52,14 +53,42 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# P0-02: Require token
+API_TOKEN = os.environ.get("LORA_STUDIO_API_TOKEN")
+
+@app.middleware("http")
+async def verify_api_token(request: Request, call_next):
+    if not API_TOKEN:
+        return await call_next(request)
+        
+    path = request.url.path
+    if path.startswith("/api/"):
+        auth_header = request.headers.get("Authorization")
+        if not auth_header or not auth_header.startswith("Bearer ") or auth_header[7:] != API_TOKEN:
+            return JSONResponse(status_code=401, content={"error": "Unauthorized"})
+            
+    return await call_next(request)
+
 active_training_sessions = {}
 active_connections: list[WebSocket] = []
 active_downloads: dict[str, asyncio.Task] = {}
 
-# --- Models directory ---
+# --- User Data & Paths (P0-03) ---
 BACKEND_DIR = Path(__file__).parent.resolve()
-DEFAULT_MODELS_DIR = BACKEND_DIR / "models"
-SETTINGS_FILE = BACKEND_DIR / "settings.json"
+USER_DATA_DIR = Path(os.environ.get("LORA_STUDIO_USER_DATA", str(BACKEND_DIR)))
+
+DEFAULT_MODELS_DIR = USER_DATA_DIR / "models"
+SETTINGS_FILE = USER_DATA_DIR / "settings.json"
+SECRETS_FILE = USER_DATA_DIR / "secrets.json"
+TRAINING_DATA_DIR = USER_DATA_DIR / "training_data"
+DEFAULT_OUTPUT_DIR = USER_DATA_DIR / "output"
+GENERATED_DIR = USER_DATA_DIR / "generated"
+
+# Ensure base directories exist
+DEFAULT_MODELS_DIR.mkdir(parents=True, exist_ok=True)
+TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
+DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 def get_models_dir() -> Path:
     if SETTINGS_FILE.exists():
@@ -81,6 +110,17 @@ def save_settings(data: dict):
             pass
     existing.update(data)
     SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+
+def save_secrets(data: dict):
+    existing = {}
+    if SECRETS_FILE.exists():
+        try:
+            existing = json.loads(SECRETS_FILE.read_text())
+        except Exception:
+            pass
+    existing.update(data)
+    SECRETS_FILE.write_text(json.dumps(existing, indent=2))
+
 
 # --- Base Model Catalog ---
 MODEL_CATALOG = [
@@ -184,9 +224,6 @@ class TrainingStartRequest(PydanticBase):
 # Global trainer instance
 from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset, estimate_training_time, ARCH_VRAM_MIN
 trainer_instance = LoRATrainer()
-
-TRAINING_DATA_DIR = BACKEND_DIR / "training_data"
-DEFAULT_OUTPUT_DIR = BACKEND_DIR / "output"
 
 def get_output_dir() -> Path:
     """Return the user-configured output directory, or the default."""
@@ -337,8 +374,6 @@ async def get_training_output(session_id: str):
 # Lazy-loaded inference pipeline cache: (model_path, lora_path) -> pipeline
 _inference_cache: dict = {}
 _inference_lock = asyncio.Lock()
-GENERATED_DIR = BACKEND_DIR / "generated"
-GENERATED_DIR.mkdir(exist_ok=True)
 
 class GenerateRequest(PydanticBase):
     prompt: str
@@ -823,6 +858,12 @@ async def auto_caption(req: CaptionRequest):
 
 @app.websocket("/ws/training")
 async def training_websocket(websocket: WebSocket):
+    # P0-02: Authenticate WebSocket
+    token = websocket.query_params.get("token")
+    if API_TOKEN and token != API_TOKEN:
+        await websocket.close(code=1008, reason="Unauthorized")
+        return
+
     await websocket.accept()
     active_connections.append(websocket)
     try:
@@ -1164,18 +1205,21 @@ async def set_models_directory(req: SetDirectoryRequest):
 
 @app.post("/api/settings/token")
 async def set_hf_token(req: dict):
-    save_settings({"hfToken": req.get("token", "")})
+    save_secrets({"hfToken": req.get("token", "")})
     return {"status": "ok"}
 
 @app.get("/api/settings/token")
 async def get_hf_token():
-    settings = {}
-    if SETTINGS_FILE.exists():
+    secrets = {}
+    if SECRETS_FILE.exists():
         try:
-            settings = json.loads(SETTINGS_FILE.read_text())
+            secrets = json.loads(SECRETS_FILE.read_text())
         except Exception:
             pass
-    return {"token": settings.get("hfToken", "")}
+    # P0-02: Do not return full token in plaintext
+    token = secrets.get("hfToken", "")
+    masked = (token[:4] + "*" * (len(token) - 4)) if len(token) > 4 else ""
+    return {"token": masked, "hasToken": bool(token)}
 
 async def run_download(model_id: str, url: str, filename: str, models_dir: Path):
     """Download a model file with real-time progress broadcasting."""
@@ -1190,13 +1234,13 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
     print(f"[Download] URL: {url}")
     
     try:
-        settings = {}
-        if SETTINGS_FILE.exists():
+        secrets = {}
+        if SECRETS_FILE.exists():
             try:
-                settings = json.loads(SETTINGS_FILE.read_text())
+                secrets = json.loads(SECRETS_FILE.read_text())
             except Exception:
                 pass
-        hf_token = settings.get("hfToken", "")
+        hf_token = secrets.get("hfToken", "")
         headers = {
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
             "Accept": "*/*"

@@ -31,8 +31,9 @@ const loraStudioAPI = {
   // --- File Dialogs ---
   selectDirectory: (title?: string): Promise<string | null> => ipcRenderer.invoke('select-directory', title),
 
-  // --- Backend Port (dynamic, injected at startup) ---
+  // --- Backend Config (dynamic, injected at startup) ---
   getBackendPort: (): Promise<number> => ipcRenderer.invoke('get-backend-port'),
+  getBackendToken: (): Promise<string> => ipcRenderer.invoke('get-backend-token'),
 
   // --- Event Listeners ---
   on: (channel: string, callback: IpcCallback) => {
