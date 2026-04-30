@@ -58,7 +58,7 @@ API_TOKEN = os.environ.get("LORA_STUDIO_API_TOKEN")
 
 @app.middleware("http")
 async def verify_api_token(request: Request, call_next):
-    if not API_TOKEN:
+    if not API_TOKEN or request.method == "OPTIONS":
         return await call_next(request)
         
     path = request.url.path

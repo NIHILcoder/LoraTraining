@@ -188,6 +188,9 @@ export async function installEnvironment(
 }
 
 let backendProcess: ReturnType<typeof spawn> | null = null;
+export function isBackendRunning(): boolean {
+  return backendProcess !== null;
+}
 
 /**
  * Start the Python backend server on the given port.

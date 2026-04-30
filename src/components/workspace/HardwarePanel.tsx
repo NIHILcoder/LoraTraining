@@ -6,6 +6,7 @@ import {
 import { Card } from '../ui/Card';
 import { Badge } from '../ui/Badge';
 import { useApp } from '../../context/AppContext';
+import { Button } from '../ui/Button';
 import { fetchGpuInfo, estimateTrainingTime } from '../../services/api';
 
 // Architecture display names
@@ -49,26 +50,25 @@ export function HardwarePanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const loadHardware = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await fetchGpuInfo();
+      setGpu(data.gpu);
+      setProfiles(data.profiles || {});
+      setEstimates(data.estimates || {});
+    } catch (err) {
+      setError('Could not connect to backend');
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
   // Fetch hardware info on mount
   useEffect(() => {
-    let cancelled = false;
-    const load = async () => {
-      try {
-        const data = await fetchGpuInfo();
-        if (cancelled) return;
-        setGpu(data.gpu);
-        setProfiles(data.profiles || {});
-        setEstimates(data.estimates || {});
-        setError(null);
-      } catch (err) {
-        if (!cancelled) setError('Could not connect to backend');
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-    load();
-    return () => { cancelled = true; };
-  }, []);
+    loadHardware();
+  }, [loadHardware]);
 
   // Live ETA estimation when config changes
   useEffect(() => {
@@ -121,9 +121,14 @@ export function HardwarePanel() {
   if (error) {
     return (
       <Card className="hw-panel hw-panel--error" padding="sm">
-        <div className="hw-panel__error">
-          <AlertTriangle size={16} />
-          <span>{error}</span>
+        <div className="hw-panel__error" style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <AlertTriangle size={16} />
+            <span>{error}</span>
+          </div>
+          <Button variant="ghost" size="sm" onClick={loadHardware}>
+            Retry
+          </Button>
         </div>
       </Card>
     );
