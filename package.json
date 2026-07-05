@@ -12,11 +12,19 @@
     "electron:start": "electron dist/main.js",
     "electron:build": "webpack --mode development --config-name electron && webpack --mode development --config-name preload",
     "electron:dev": "npm run electron:build && concurrently \"npm run dev\" \"wait-on http://localhost:3005 && npm run electron:start\"",
-    "electron:dist": "npm run build && electron-builder"
+    "electron:dist": "npm run build && electron-builder",
+    "electron:publish": "npm run build && electron-builder --publish always"
   },
   "build": {
     "appId": "com.lorastudio.app",
     "productName": "LoRA Studio",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "NIHILcoder",
+        "repo": "LoraTraining"
+      }
+    ],
     "directories": {
       "output": "dist/release"
     },
@@ -84,5 +92,8 @@
     "webpack": "^5.96.1",
     "webpack-cli": "^5.1.4",
     "webpack-dev-server": "^5.1.0"
+  },
+  "dependencies": {
+    "electron-updater": "^6.8.9"
   }
 }

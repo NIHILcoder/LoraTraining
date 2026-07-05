@@ -1,4 +1,5 @@
 import { app, BrowserWindow, ipcMain, Notification, dialog, shell } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import * as path from 'path';
 import * as net from 'net';
 import * as crypto from 'crypto';
@@ -36,6 +37,33 @@ function findFreePort(preferred: number): Promise<number> {
 /** The dynamically assigned backend port for this session */
 let backendPort: number = 8000;
 
+// --- Auto-update (electron-updater + GitHub Releases) ---
+let autoUpdaterWired = false;
+let rendererSend: ((channel: string, ...args: any[]) => void) | null = null;
+
+function wireAutoUpdater() {
+  if (autoUpdaterWired) return;
+  autoUpdaterWired = true;
+
+  autoUpdater.autoDownload = true;          // fetch the update in the background once found
+  autoUpdater.autoInstallOnAppQuit = true;  // apply it on next quit if the user doesn't restart sooner
+
+  const emit = (data: any) => { if (rendererSend) rendererSend('update-event', data); };
+
+  autoUpdater.on('checking-for-update', () => emit({ type: 'checking' }));
+  autoUpdater.on('update-available', (info) => emit({ type: 'available', version: info?.version }));
+  autoUpdater.on('update-not-available', () => emit({ type: 'not-available' }));
+  autoUpdater.on('download-progress', (p) => emit({
+    type: 'progress',
+    percent: Math.round(p.percent),
+    bytesPerSecond: Math.round(p.bytesPerSecond),
+    transferred: p.transferred,
+    total: p.total,
+  }));
+  autoUpdater.on('update-downloaded', (info) => emit({ type: 'downloaded', version: info?.version }));
+  autoUpdater.on('error', (err) => emit({ type: 'error', message: (err && (err as Error).message) || String(err) }));
+}
+
 function createWindow() {
   const mainWindow = new BrowserWindow({
     width: 1280,
@@ -66,6 +94,10 @@ function createWindow() {
     }
   };
 
+  // Route auto-updater events to the current window; register updater listeners once
+  rendererSend = safeSend;
+  wireAutoUpdater();
+
   // Setup IPC for custom titlebar
   ipcMain.removeAllListeners('window-min');
   ipcMain.removeAllListeners('window-max');
@@ -75,6 +107,7 @@ function createWindow() {
   ipcMain.removeAllListeners('install-env');
   ipcMain.removeAllListeners('start-backend');
   ipcMain.removeAllListeners('select-directory');
+  ipcMain.removeAllListeners('install-update');
 
   ipcMain.on('window-min', () => mainWindow.minimize());
   ipcMain.on('window-max', () => {
@@ -107,6 +140,7 @@ function createWindow() {
   ipcMain.removeHandler('select-directory');
   ipcMain.removeHandler('select-file');
   ipcMain.removeHandler('open-external');
+  ipcMain.removeHandler('check-for-updates');
 
   ipcMain.handle('check-env', () => checkEnvExists());
 
@@ -179,6 +213,23 @@ function createWindow() {
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];
+  });
+
+  // --- Auto-update ---
+  ipcMain.handle('check-for-updates', async () => {
+    if (!app.isPackaged) {
+      return { ok: false, error: 'Updates are only available in the installed app.' };
+    }
+    try {
+      const result = await autoUpdater.checkForUpdates();
+      return { ok: true, version: result?.updateInfo?.version };
+    } catch (e: any) {
+      return { ok: false, error: e?.message || String(e) };
+    }
+  });
+
+  ipcMain.on('install-update', () => {
+    if (app.isPackaged) autoUpdater.quitAndInstall();
   });
 }
 

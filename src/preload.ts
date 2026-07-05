@@ -28,6 +28,10 @@ const loraStudioAPI = {
   installEnv: () => ipcRenderer.send('install-env'),
   startBackend: () => ipcRenderer.send('start-backend'),
 
+  // --- Auto Update ---
+  checkForUpdates: (): Promise<{ ok: boolean; version?: string; error?: string }> => ipcRenderer.invoke('check-for-updates'),
+  installUpdate: () => ipcRenderer.send('install-update'),
+
   // --- File Dialogs ---
   selectDirectory: (title?: string): Promise<string | null> => ipcRenderer.invoke('select-directory', title),
   selectFile: (title?: string, filters?: { name: string; extensions: string[] }[]): Promise<string | null> => ipcRenderer.invoke('select-file', title, filters),
@@ -45,6 +49,7 @@ const loraStudioAPI = {
       'install-complete',
       'backend-log',
       'backend-started',
+      'update-event',
     ];
     if (validChannels.includes(channel)) {
       const wrappedCallback = (_event: Electron.IpcRendererEvent, ...args: any[]) => callback(...args);
@@ -72,6 +77,7 @@ const loraStudioAPI = {
       'install-complete',
       'backend-log',
       'backend-started',
+      'update-event',
     ];
     if (validChannels.includes(channel)) {
       ipcRenderer.removeAllListeners(channel);

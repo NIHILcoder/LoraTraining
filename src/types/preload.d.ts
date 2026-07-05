@@ -31,6 +31,10 @@ interface LoraStudioAPI {
   getBackendPort: () => Promise<number>;
   getBackendToken: () => Promise<string>;
 
+  // Auto Update
+  checkForUpdates: () => Promise<{ ok: boolean; version?: string; error?: string }>;
+  installUpdate: () => void;
+
   // Event Listeners
   on: (channel: string, callback: IpcCallback) => any;
   once: (channel: string, callback: IpcCallback) => void;

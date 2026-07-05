@@ -90,6 +90,8 @@ module.exports = (env, argv) => {
     devtool: isDev ? 'eval-source-map' : 'source-map',
     externals: {
       fsevents: "require('fsevents')",
+      // Keep electron-updater out of the bundle; it's shipped in node_modules and required at runtime
+      'electron-updater': "require('electron-updater')",
     },
   };
 

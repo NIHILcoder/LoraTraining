@@ -8,6 +8,7 @@ import { GalleryPage } from './pages/GalleryPage';
 import { PlaygroundPage } from './pages/PlaygroundPage';
 import { TitleBar } from './components/layout/TitleBar';
 import { SetupScreen } from './components/setup/SetupScreen';
+import { UpdateNotification } from './components/UpdateNotification';
 import { Card } from './components/ui/Card';
 import { Cpu, AlertTriangle } from 'lucide-react';
 import { initApiPort } from './services/api';
@@ -101,6 +102,7 @@ export function App() {
       <Router>
         <div className="window-layout">
           <TitleBar />
+          <UpdateNotification />
           <div className="app-layout">
             <Sidebar />
             <main className="app-main">
