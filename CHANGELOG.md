@@ -2,6 +2,33 @@
 
 All notable changes to **LoRA Studio** will be documented in this file.
 
+## [1.0.0-beta.2] - 2026-07-05
+
+### Fixed (correctness / data-loss)
+- **SD 2.1 training** gated off — it was silently training with the wrong text encoder and epsilon loss. The trainer now also respects v-prediction targets.
+- **Auto-caption-all** no longer overwrites earlier captions (stale-closure bug).
+- Advanced training settings (aspect-ratio bucketing, caption dropout, noise offset) now actually reach the trainer — they were dropped by the request model.
+- LoRA weight is no longer applied twice during inference.
+- Concurrent generations are serialized (inference pipeline cache race).
+- Uploaded image dimensions are read for real instead of hardcoded 1024×1024.
+- Prompt/exception text is escaped in the placeholder SVG; the captioner returns proper HTTP errors instead of sentinel strings.
+- Generated-image URLs are relative and the auth gate accepts a query token, so gallery/generated images load under the session token.
+
+### Added
+- **Downloads**: resumable/segmented downloads (survive network drops), SHA256 verification hook, disk-space precheck.
+- **Models**: import an existing local `.safetensors` via a file picker.
+- **Dataset**: bulk caption tools (prepend/trigger word, append, find-replace), server-side batch captioning, atomic per-image delete, dataset validation hints.
+- **Playground**: batch generation (N images), visible generation errors, served-URL output with embedded A1111/Civitai PNG metadata (no more multi-MB base64 payloads).
+- **Config**: saved user presets (localStorage).
+- Vitest test harness with reducer coverage.
+
+### Changed
+- Training: no-replacement per-bucket batch sampling, grad-accumulation-aware LR schedule, seeded RNGs.
+- Python dependencies pinned to tested versions; dependency versions logged at startup; custom `.ckpt/.bin/.pt` (pickle) models are rejected for safety.
+- Training loss/log history is now capped to bound memory on long runs.
+
+---
+
 ## [1.0.0-beta.1] - 2026-04-27
 
 ### Added
