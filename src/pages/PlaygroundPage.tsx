@@ -80,6 +80,8 @@ export function PlaygroundPage() {
   const [history, setHistory] = useState<GenHistory[]>([]);
   const [activeIndex, setActiveIndex] = useState<number | null>(null);
   const [copiedSeed, setCopiedSeed] = useState(false);
+  const [batchCount, setBatchCount] = useState(1);
+  const [genError, setGenError] = useState<string | null>(null);
 
   // Load available LoRA models
   useEffect(() => {
@@ -125,46 +127,57 @@ export function PlaygroundPage() {
 
   const handleGenerate = async () => {
     setIsGenerating(true);
+    setGenError(null);
     try {
-      const actualSeed = seed === -1 ? Math.floor(Math.random() * 2147483647) : seed;
       const loraModelName = availableModels.find(m => m.id === selectedModel)?.name || 'None';
       const baseModelName = availableBaseModels.find(m => m.id === selectedBaseModel)?.name || 'Auto';
-      const res = await generateImage({
-        prompt,
-        negativePrompt,
-        width,
-        height,
-        seed: actualSeed,
-        cfgScale,
-        steps,
-        loraWeight,
-        sampler,
-        loraModelId: selectedModel !== 'none' ? selectedModel : null,
-        baseModelId: selectedBaseModel !== 'auto' ? selectedBaseModel : null,
-      });
+      const count = Math.max(1, Math.min(batchCount, 8));
 
-      const newGen: GenHistory = {
-        id: Math.random().toString(36).substr(2, 9),
-        url: res.url,
-        seed: res.seed,
-        prompt,
-        negativePrompt,
-        width,
-        height,
-        cfgScale,
-        steps,
-        sampler,
-        loraWeight,
-        loraName: loraModelName,
-        baseModelName,
-        generatedAt: new Date().toISOString(),
-        isMock: res.mock,
-        mockReason: res.reason,
-      };
-      setHistory(prev => [newGen, ...prev].slice(0, 30));
-      setActiveIndex(0);
-    } catch (err) {
-      console.error('Generation failed:', err);
+      for (let i = 0; i < count; i++) {
+        // Vary the seed per image in a batch; a fixed seed increments, -1 stays fully random.
+        const actualSeed = seed === -1 ? Math.floor(Math.random() * 2147483647) : seed + i;
+        try {
+          const res = await generateImage({
+            prompt,
+            negativePrompt,
+            width,
+            height,
+            seed: actualSeed,
+            cfgScale,
+            steps,
+            loraWeight,
+            sampler,
+            loraModelId: selectedModel !== 'none' ? selectedModel : null,
+            baseModelId: selectedBaseModel !== 'auto' ? selectedBaseModel : null,
+          });
+
+          const newGen: GenHistory = {
+            id: Math.random().toString(36).substring(2, 11),
+            url: res.url,
+            seed: res.seed,
+            prompt,
+            negativePrompt,
+            width,
+            height,
+            cfgScale,
+            steps,
+            sampler,
+            loraWeight,
+            loraName: loraModelName,
+            baseModelName,
+            generatedAt: new Date().toISOString(),
+            isMock: res.mock,
+            mockReason: res.reason,
+          };
+          setHistory(prev => [newGen, ...prev].slice(0, 30));
+          setActiveIndex(0);
+          // Surface real inference failures (backend flags error=true) instead of silently mocking
+          if (res.error && res.reason) setGenError(res.reason);
+        } catch (errInner: any) {
+          console.error('Generation failed:', errInner);
+          setGenError(errInner?.message || 'Generation failed');
+        }
+      }
     } finally {
       setIsGenerating(false);
     }
@@ -372,6 +385,18 @@ export function PlaygroundPage() {
                 <X size={14} />
               </button>
             </div>
+
+            <div style={{ marginTop: '12px' }}>
+              <label className="pg-label" style={{ fontSize: '11px' }}>Batch count</label>
+              <input
+                type="number"
+                className="pg-select"
+                min={1}
+                max={8}
+                value={batchCount}
+                onChange={(e) => setBatchCount(Math.max(1, Math.min(8, Number(e.target.value) || 1)))}
+              />
+            </div>
           </Card>
         </div>
 
@@ -384,8 +409,14 @@ export function PlaygroundPage() {
           disabled={isGenerating || !prompt}
           style={{ flexShrink: 0, marginTop: '8px' }}
         >
-          {isGenerating ? 'Generating...' : 'Generate'}
+          {isGenerating ? 'Generating...' : (batchCount > 1 ? `Generate ${batchCount}` : 'Generate')}
         </Button>
+
+        {genError && (
+          <div style={{ marginTop: '8px', padding: '8px 12px', background: 'rgba(239,68,68,0.1)', border: '1px solid var(--color-error)', borderRadius: 'var(--radius-md)', color: 'var(--color-error)', fontSize: '12px' }}>
+            {genError}
+          </div>
+        )}
       </div>
 
       {/* Main Canvas Area */}

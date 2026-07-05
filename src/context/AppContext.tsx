@@ -37,7 +37,7 @@ const defaultTrainingStatus: TrainingStatus = {
   logs: [],
 };
 
-const initialState: AppState = {
+export const initialState: AppState = {
   datasets: [],
   currentDataset: null,
   trainingConfig: defaultConfig,
@@ -48,7 +48,7 @@ const initialState: AppState = {
   wsConnected: false,
 };
 
-function appReducer(state: AppState, action: AppAction): AppState {
+export function appReducer(state: AppState, action: AppAction): AppState {
   switch (action.type) {
     case 'SET_DATASETS':
       return { ...state, datasets: action.payload };
@@ -119,7 +119,8 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         trainingStatus: {
           ...state.trainingStatus,
-          lossHistory: [...state.trainingStatus.lossHistory, action.payload],
+          // Cap history so long runs (10k+ steps) don't grow unbounded and slow the chart re-render
+          lossHistory: [...state.trainingStatus.lossHistory, action.payload].slice(-2000),
           currentStep: action.payload.step,
           currentLoss: action.payload.loss,
           learningRate: action.payload.learningRate,
@@ -131,7 +132,7 @@ function appReducer(state: AppState, action: AppAction): AppState {
         ...state,
         trainingStatus: {
           ...state.trainingStatus,
-          logs: [...state.trainingStatus.logs, action.payload],
+          logs: [...state.trainingStatus.logs, action.payload].slice(-1000),
         },
       };
 

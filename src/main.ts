@@ -105,6 +105,7 @@ function createWindow() {
   ipcMain.removeHandler('get-backend-port');
   ipcMain.removeHandler('get-backend-token');
   ipcMain.removeHandler('select-directory');
+  ipcMain.removeHandler('select-file');
   ipcMain.removeHandler('open-external');
 
   ipcMain.handle('check-env', () => checkEnvExists());
@@ -165,6 +166,16 @@ function createWindow() {
     const result = await dialog.showOpenDialog(mainWindow, {
       title: title || 'Select Directory',
       properties: ['openDirectory', 'createDirectory'],
+    });
+    if (result.canceled || result.filePaths.length === 0) return null;
+    return result.filePaths[0];
+  });
+
+  ipcMain.handle('select-file', async (_event, title?: string, filters?: Electron.FileFilter[]) => {
+    const result = await dialog.showOpenDialog(mainWindow, {
+      title: title || 'Select File',
+      properties: ['openFile'],
+      filters: filters && filters.length ? filters : [{ name: 'Models', extensions: ['safetensors'] }],
     });
     if (result.canceled || result.filePaths.length === 0) return null;
     return result.filePaths[0];

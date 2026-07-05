@@ -26,6 +26,7 @@ import {
   cancelBaseModelDownload,
   deleteBaseModel,
   addCustomModel,
+  importLocalModel,
   setModelsDirectory,
   getWsUrl,
   getHfToken,
@@ -194,6 +195,19 @@ export function ModelsPage() {
       setDeleteConfirm(null);
     } catch (err) {
       console.error('Delete failed:', err);
+    }
+  };
+
+  const handleImportLocal = async () => {
+    const api = window.loraStudio;
+    if (!api?.selectFile) return;
+    const filePath = await api.selectFile('Select a .safetensors model', [{ name: 'Models', extensions: ['safetensors'] }]);
+    if (!filePath) return;
+    try {
+      const result = await importLocalModel(filePath);
+      dispatch({ type: 'ADD_BASE_MODEL', payload: result as BaseModel });
+    } catch (err) {
+      console.error('Import failed:', err);
     }
   };
 
@@ -386,14 +400,24 @@ export function ModelsPage() {
         title="Models Hub"
         subtitle="Download and manage base models for LoRA training"
         actions={
-          <Button
-            variant="outline"
-            size="sm"
-            icon={<Plus size={14} />}
-            onClick={() => setShowCustomForm(true)}
-          >
-            Add Custom Model
-          </Button>
+          <div style={{ display: 'flex', gap: '8px' }}>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<Plus size={14} />}
+              onClick={handleImportLocal}
+            >
+              Import File
+            </Button>
+            <Button
+              variant="outline"
+              size="sm"
+              icon={<Plus size={14} />}
+              onClick={() => setShowCustomForm(true)}
+            >
+              Add Custom Model
+            </Button>
+          </div>
         }
       />
 

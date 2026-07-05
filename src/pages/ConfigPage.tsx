@@ -294,8 +294,8 @@ export function ConfigPage() {
                 value={config.baseModel}
                 options={[
                   { value: 'sd15', label: 'Stable Diffusion 1.5' },
+                  { value: 'sd21', label: 'Stable Diffusion 2.1' },
                   { value: 'sdxl', label: 'Stable Diffusion XL' },
-                  { value: 'flux', label: 'Flux.1 (Dev)' },
                 ]}
                 tooltip="The foundation model you are training on. This affects optimal parameters."
                 onChange={(v) => updateConfig({ baseModel: v as BaseModelType })}

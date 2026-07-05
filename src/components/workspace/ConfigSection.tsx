@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Zap,
   Shield,
@@ -6,6 +6,7 @@ import {
   ChevronDown,
   Info,
   SlidersHorizontal,
+  X,
 } from 'lucide-react';
 import { Badge } from '../ui/Badge';
 import { useApp } from '../../context/AppContext';
@@ -32,6 +33,31 @@ const presetIcons: Record<string, React.ReactNode> = {
   gauge: <Gauge size={14} />,
   zap: <Zap size={14} />,
 };
+
+interface UserPreset {
+  id: string;
+  name: string;
+  config: Partial<TrainingConfig>;
+}
+
+const USER_PRESETS_KEY = 'loraStudio.userPresets';
+
+function loadUserPresets(): UserPreset[] {
+  try {
+    const raw = localStorage.getItem(USER_PRESETS_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch {
+    return [];
+  }
+}
+
+function persistUserPresets(presets: UserPreset[]) {
+  try {
+    localStorage.setItem(USER_PRESETS_KEY, JSON.stringify(presets));
+  } catch {
+    /* ignore quota / serialization errors */
+  }
+}
 
 interface ParamSliderProps {
   label: string; value: number; min: number; max: number; step: number;
@@ -134,6 +160,40 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
     setActivePreset(preset.id);
   };
 
+  const [userPresets, setUserPresets] = useState<UserPreset[]>([]);
+  const [savePresetName, setSavePresetName] = useState('');
+
+  useEffect(() => {
+    setUserPresets(loadUserPresets());
+  }, []);
+
+  const applyUserPreset = (preset: UserPreset) => {
+    dispatch({ type: 'UPDATE_CONFIG', payload: preset.config });
+    setActivePreset(preset.id);
+  };
+
+  const handleSavePreset = () => {
+    const name = savePresetName.trim();
+    if (!name) return;
+    // Save everything except identity fields so applying a preset doesn't rename the config
+    const rest = { ...config } as Partial<TrainingConfig>;
+    delete rest.id;
+    delete rest.name;
+    const preset: UserPreset = { id: `user-${Date.now()}`, name, config: rest };
+    const next = [...userPresets, preset];
+    setUserPresets(next);
+    persistUserPresets(next);
+    setActivePreset(preset.id);
+    setSavePresetName('');
+  };
+
+  const handleDeletePreset = (id: string) => {
+    const next = userPresets.filter(p => p.id !== id);
+    setUserPresets(next);
+    persistUserPresets(next);
+    if (activePreset === id) setActivePreset(null);
+  };
+
   return (
     <div className={`ws-section ${disabled ? 'ws-section--disabled' : ''}`}>
       <button className="ws-section__toggle" onClick={() => setIsOpen(!isOpen)}>
@@ -160,17 +220,48 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
             ))}
           </div>
 
+          {/* Saved user presets */}
+          {userPresets.length > 0 && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
+              {userPresets.map(p => (
+                <div key={p.id} style={{ display: 'inline-flex', alignItems: 'center', gap: '2px' }}>
+                  <button
+                    className={`ws-preset-btn ${activePreset === p.id ? 'ws-preset-btn--active' : ''}`}
+                    onClick={() => applyUserPreset(p)}
+                  >
+                    {p.name}
+                  </button>
+                  <button
+                    onClick={() => handleDeletePreset(p.id)}
+                    title="Delete preset"
+                    style={{ background: 'none', border: 'none', color: 'var(--color-text-tertiary)', cursor: 'pointer', padding: '2px', display: 'flex' }}
+                  >
+                    <X size={12} />
+                  </button>
+                </div>
+              ))}
+            </div>
+          )}
+
+          {/* Save current config as a preset */}
+          <div style={{ display: 'flex', gap: '6px', marginBottom: '8px' }}>
+            <input
+              placeholder="Save current settings as preset…"
+              value={savePresetName}
+              onChange={e => setSavePresetName(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Enter') handleSavePreset(); }}
+              style={{ flex: 1, minWidth: 0, padding: '6px 10px', background: 'var(--color-bg-elevated)', border: '1px solid var(--color-surface-border)', borderRadius: 'var(--radius-sm)', color: 'var(--color-text-primary)', outline: 'none', fontSize: '12px' }}
+            />
+            <button className="ws-preset-btn" onClick={handleSavePreset}>Save</button>
+          </div>
+
           <div className="ws-config-grid">
             {/* Basic */}
             <div className="ws-config-subsection">Basic</div>
             <ParamSelect label="Base Model" value={config.baseModel}
               options={[
                 { value: 'sd15', label: 'SD 1.5 — 512px' },
-                { value: 'sd21', label: 'SD 2.1 — 768px' },
                 { value: 'sdxl', label: 'SDXL — 1024px' },
-                { value: 'sd3', label: 'SD3 — 1024px' },
-                { value: 'flux', label: 'Flux.1 — 1024px' },
-                { value: 'cascade', label: 'Cascade — 1024px' },
               ]}
               tooltip="Foundation model architecture"
               onChange={(v) => updateConfig({ baseModel: v as BaseModelType })}

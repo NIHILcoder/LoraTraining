@@ -46,7 +46,24 @@ async function apiFetch(input: RequestInfo | URL, init?: RequestInit): Promise<R
   if (_backendToken) {
     headers.set('Authorization', `Bearer ${_backendToken}`);
   }
-  return fetch(input, { ...init, headers });
+  const response = await fetch(input, { ...init, headers });
+  
+  // Intercept errors and throw with detailed message
+  if (!response.ok) {
+    let errorMsg = `HTTP Error ${response.status}`;
+    try {
+      const errData = await response.json();
+      if (errData.detail) errorMsg = errData.detail;
+      else if (errData.error) errorMsg = errData.error;
+    } catch (e) {
+      // Not JSON or empty body
+    }
+    throw new Error(errorMsg);
+  }
+  
+  // Some endpoints still return {"error": "..."} with 200 OK
+  // We can intercept that if we inspect the body, but it's better to just fix the backend.
+  return response;
 }
 
 // --- Helpers ---
@@ -61,82 +78,101 @@ function delay(ms: number): Promise<void> {
 // --- API Functions ---
 
 export async function fetchDatasets(): Promise<Dataset[]> {
-  await delay(300);
-  return [];
+  const response = await apiFetch(`${getApiBase()}/datasets`);
+  if (!response.ok) throw new Error('Failed to fetch datasets');
+  const data = await response.json();
+  // Prefix URLs with the dynamic getApiBase() minus /api since the backend returns /api/...
+  // Actually, we can just replace /api with getApiBase()
+  const base = getApiBase().replace(/\/api$/, '');
+  return data.map((ds: any) => ({
+    ...ds,
+    images: ds.images.map((img: any) => ({
+      ...img,
+      url: `${base}${img.url}?token=${_backendToken}`
+    }))
+  }));
 }
 
 export async function createDataset(name: string): Promise<Dataset> {
-  await delay(200);
+  const response = await apiFetch(`${getApiBase()}/datasets`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ name }),
+  });
+  if (!response.ok) throw new Error('Failed to create dataset');
+  return response.json();
+}
+
+export async function deleteDataset(id: string): Promise<void> {
+  const response = await apiFetch(`${getApiBase()}/datasets/${id}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) throw new Error('Failed to delete dataset');
+}
+
+export async function updateDataset(dataset: Dataset): Promise<Dataset> {
+  // Strip the dynamic origin from image URLs before saving
+  const dsToSave = {
+    ...dataset,
+    images: dataset.images.map(img => {
+      let relativeUrl = img.url;
+      try {
+        const urlObj = new URL(img.url);
+        relativeUrl = urlObj.pathname;
+      } catch (e) {
+        // Not an absolute URL, leave it
+      }
+      return { ...img, url: relativeUrl };
+    })
+  };
+  
+  const response = await apiFetch(`${getApiBase()}/datasets/${dataset.id}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ dataset: dsToSave }),
+  });
+  if (!response.ok) throw new Error('Failed to update dataset');
+  const data = await response.json();
+  
+  const base = getApiBase().replace(/\/api$/, '');
   return {
-    id: generateId(),
-    name,
-    images: [],
-    totalSize: 0,
-    createdAt: new Date().toISOString(),
-    updatedAt: new Date().toISOString(),
+    ...data,
+    images: data.images.map((img: any) => ({
+      ...img,
+      url: `${base}${img.url}?token=${_backendToken}`
+    }))
   };
 }
 
 export async function uploadImage(
-  _datasetId: string,
+  datasetId: string,
   file: File & { path?: string }
 ): Promise<DatasetImage> {
-  // Simulate minor upload delay
-  await delay(100 + Math.random() * 200);
-  
-  // Generate a lightweight thumbnail using Canvas to prevent UI freezing
-  const thumbUrl = await new Promise<string>((resolve) => {
-    const img = new Image();
-    const objectUrl = URL.createObjectURL(file);
-    
-    img.onload = () => {
-      const canvas = document.createElement('canvas');
-      const MAX_SIZE = 256;
-      let width = img.width;
-      let height = img.height;
-
-      if (width > height) {
-        if (width > MAX_SIZE) {
-          height *= MAX_SIZE / width;
-          width = MAX_SIZE;
-        }
-      } else {
-        if (height > MAX_SIZE) {
-          width *= MAX_SIZE / height;
-          height = MAX_SIZE;
-        }
-      }
-      
-      canvas.width = width;
-      canvas.height = height;
-      const ctx = canvas.getContext('2d');
-      if (ctx) {
-        ctx.drawImage(img, 0, 0, width, height);
-      }
-      
-      resolve(canvas.toDataURL('image/jpeg', 0.7));
-      URL.revokeObjectURL(objectUrl); // Free up raw image memory
+  if (file.path) {
+    const response = await apiFetch(`${getApiBase()}/datasets/${datasetId}/images/local`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ filePath: file.path, filename: file.name, size: file.size })
+    });
+    if (!response.ok) throw new Error('Failed to upload image');
+    const data = await response.json();
+    const base = getApiBase().replace(/\/api$/, '');
+    return {
+      ...data,
+      url: `${base}${data.url}?token=${_backendToken}`
     };
-    img.src = objectUrl;
-  });
-
-  return {
-    id: generateId(),
-    filename: file.name,
-    url: thumbUrl,
-    filePath: file.path, 
-    size: file.size,
-    width: 1024, // Mocked original width
-    height: 1024, // Mocked original height
-    uploadedAt: new Date().toISOString(),
-  };
+  }
+  throw new Error("File path is required. Only local files are supported.");
 }
 
 export async function deleteImage(
-  _datasetId: string,
-  _imageId: string
+  datasetId: string,
+  imageId: string
 ): Promise<void> {
-  await delay(200);
+  const response = await apiFetch(`${getApiBase()}/datasets/${datasetId}/images/${imageId}`, {
+    method: 'DELETE',
+  });
+  if (!response.ok) throw new Error('Failed to delete image');
 }
 
 export async function autoCaptionImage(imageId: string, imageUrl: string): Promise<string[]> {
@@ -148,6 +184,19 @@ export async function autoCaptionImage(imageId: string, imageUrl: string): Promi
   if (!response.ok) throw new Error('Failed to auto-caption image');
   const data = await response.json();
   return data.tags;
+}
+
+export async function autoCaptionBatch(
+  images: { imageId: string; imageUrl: string }[]
+): Promise<{ imageId: string; tags?: string[]; error?: string }[]> {
+  const response = await apiFetch(`${getApiBase()}/dataset/caption/batch`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ images }),
+  });
+  if (!response.ok) throw new Error('Failed to batch-caption');
+  const data = await response.json();
+  return data.results || [];
 }
 
 export async function generateImage(params: {
@@ -162,14 +211,20 @@ export async function generateImage(params: {
   sampler?: string;
   loraModelId?: string | null;
   baseModelId?: string | null;
-}): Promise<{url: string, seed: number, mock?: boolean, reason?: string}> {
+}): Promise<{url: string, seed: number, mock?: boolean, error?: boolean, reason?: string}> {
   const response = await apiFetch(`${getApiBase()}/playground/generate`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(params),
   });
   if (!response.ok) throw new Error('Failed to generate image');
-  return response.json();
+  const data = await response.json();
+  // Real generations return a served path; prefix origin + token so <img> can load it.
+  if (data.url && typeof data.url === 'string' && data.url.startsWith('/api/generated/')) {
+    const base = getApiBase().replace(/\/api$/, '');
+    data.url = `${base}${data.url}?token=${_backendToken}`;
+  }
+  return data;
 }
 
 export async function fetchAvailableBaseModels(): Promise<{ id: string; name: string; architecture: string; filename: string }[]> {
@@ -290,6 +345,20 @@ export async function addCustomModel(
   return response.json();
 }
 
+export async function importLocalModel(
+  filePath: string,
+  name?: string,
+  architecture?: string
+): Promise<any> {
+  const response = await apiFetch(`${getApiBase()}/models/base/import`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ filePath, name, architecture }),
+  });
+  if (!response.ok) throw new Error('Failed to import model');
+  return response.json();
+}
+
 export async function setModelsDirectory(path: string): Promise<{ modelsDirectory: string }> {
   const response = await apiFetch(`${getApiBase()}/models/directory`, {
     method: 'POST',
@@ -350,7 +419,15 @@ export async function fetchGeneratedImages(): Promise<any[]> {
   const response = await apiFetch(`${getApiBase()}/gallery/images`);
   if (!response.ok) throw new Error('Failed to fetch generated images');
   const data = await response.json();
-  return data.images;
+  // Backend returns a relative /api/generated/... path (older records may be absolute).
+  // Normalize to the dynamic origin and append the auth token so <img> requests pass the gate.
+  const base = getApiBase().replace(/\/api$/, '');
+  return (data.images || []).map((img: any) => {
+    let u: string = img.url || '';
+    const idx = u.indexOf('/api/generated/');
+    if (idx >= 0) u = `${base}${u.slice(idx)}?token=${_backendToken}`;
+    return { ...img, url: u };
+  });
 }
 
 export async function deleteGeneratedImage(id: string): Promise<void> {

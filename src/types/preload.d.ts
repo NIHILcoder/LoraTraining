@@ -25,6 +25,7 @@ interface LoraStudioAPI {
 
   // File Dialogs
   selectDirectory: (title?: string) => Promise<string | null>;
+  selectFile: (title?: string, filters?: { name: string; extensions: string[] }[]) => Promise<string | null>;
 
   // Backend Port & Token
   getBackendPort: () => Promise<number>;

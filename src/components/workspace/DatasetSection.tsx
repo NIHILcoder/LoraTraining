@@ -16,7 +16,7 @@ import { Badge } from '../ui/Badge';
 import { Modal } from '../ui/Modal';
 import { ProgressBar } from '../ui/ProgressBar';
 import { useApp } from '../../context/AppContext';
-import { uploadImage, createDataset, autoCaptionImage } from '../../services/api';
+import { uploadImage, createDataset, autoCaptionBatch, updateDataset, deleteImage } from '../../services/api';
 import type { DatasetImage } from '../../types';
 
 export function DatasetSection() {
@@ -29,8 +29,14 @@ export function DatasetSection() {
   const [selectedImages, setSelectedImages] = useState<Set<string>>(new Set());
   const [captioningMap, setCaptioningMap] = useState<Record<string, boolean>>({});
   const [tagInput, setTagInput] = useState('');
+  const [showCapTools, setShowCapTools] = useState(false);
+  const [prependText, setPrependText] = useState('');
+  const [appendText, setAppendText] = useState('');
+  const [findText, setFindText] = useState('');
+  const [replaceText, setReplaceText] = useState('');
 
   const images = state.currentDataset?.images ?? [];
+  const missingCaptions = images.filter(i => !i.captions || i.captions.length === 0).length;
 
   const handleAddTag = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && tagInput.trim()) {
@@ -43,6 +49,13 @@ export function DatasetSection() {
             payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
           });
           setPreviewImage({ ...previewImage, captions: newTags });
+          
+          // Sync with backend
+          const updatedDs = {
+            ...state.currentDataset,
+            images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
+          };
+          updateDataset(updatedDs).catch(err => console.error('Failed to sync dataset:', err));
         }
         setTagInput('');
       }
@@ -57,6 +70,13 @@ export function DatasetSection() {
         payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
       });
       setPreviewImage({ ...previewImage, captions: newTags });
+
+      // Sync with backend
+      const updatedDs = {
+        ...state.currentDataset,
+        images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
+      };
+      updateDataset(updatedDs).catch(err => console.error('Failed to sync dataset:', err));
     }
   };
 
@@ -70,19 +90,69 @@ export function DatasetSection() {
     toCaption.forEach(img => newMap[img.id] = true);
     setCaptioningMap(prev => ({ ...prev, ...newMap }));
 
-    for (const img of toCaption) {
-      try {
-        const tags = await autoCaptionImage(img.id, img.filePath || img.url);
-        dispatch({
-          type: 'UPDATE_DATASET_IMAGE_CAPTIONS',
-          payload: { datasetId: ds.id, imageId: img.id, captions: tags }
-        });
-      } catch (err) {
-        console.error('Captioning failed', err);
-      } finally {
-        setCaptioningMap(prev => ({ ...prev, [img.id]: false }));
+    try {
+      // One request for the whole batch, one persist — no per-image round trips or overwrite races.
+      const results = await autoCaptionBatch(
+        toCaption.map(img => ({ imageId: img.id, imageUrl: img.filePath || img.url }))
+      );
+      let workingImages = ds.images.map(i => ({ ...i }));
+      for (const r of results) {
+        if (r.tags && r.tags.length) {
+          dispatch({
+            type: 'UPDATE_DATASET_IMAGE_CAPTIONS',
+            payload: { datasetId: ds.id, imageId: r.imageId, captions: r.tags }
+          });
+          workingImages = workingImages.map(i => i.id === r.imageId ? { ...i, captions: r.tags! } : i);
+        }
       }
+      await updateDataset({ ...ds, images: workingImages });
+    } catch (err) {
+      console.error('Batch captioning failed:', err);
+    } finally {
+      const clearMap: Record<string, boolean> = {};
+      toCaption.forEach(img => clearMap[img.id] = false);
+      setCaptioningMap(prev => ({ ...prev, ...clearMap }));
     }
+  };
+
+  // Bulk caption editing across the whole dataset (also serves as trigger-word management).
+  const applyCaptionTransform = async (transform: (caps: string[]) => string[]) => {
+    const ds = state.currentDataset;
+    if (!ds) return;
+    const nextImages = ds.images.map(img => ({ ...img, captions: transform(img.captions || []) }));
+    nextImages.forEach(img =>
+      dispatch({ type: 'UPDATE_DATASET_IMAGE_CAPTIONS', payload: { datasetId: ds.id, imageId: img.id, captions: img.captions || [] } })
+    );
+    try {
+      await updateDataset({ ...ds, images: nextImages });
+    } catch (err) {
+      console.error('Failed to persist caption changes:', err);
+    }
+  };
+
+  const dedupe = (caps: string[]) => caps.filter((c, i) => c.trim() !== '' && caps.indexOf(c) === i);
+
+  const handlePrependAll = () => {
+    const t = prependText.trim();
+    if (!t) return;
+    applyCaptionTransform(caps => dedupe([t, ...caps]));
+    setPrependText('');
+  };
+
+  const handleAppendAll = () => {
+    const t = appendText.trim();
+    if (!t) return;
+    applyCaptionTransform(caps => dedupe([...caps, t]));
+    setAppendText('');
+  };
+
+  const handleFindReplaceAll = () => {
+    const f = findText.trim();
+    if (!f) return;
+    const r = replaceText.trim();
+    applyCaptionTransform(caps => dedupe(caps.map(c => c.split(f).join(r))));
+    setFindText('');
+    setReplaceText('');
   };
 
   const ensureDataset = useCallback(async () => {
@@ -122,9 +192,11 @@ export function DatasetSection() {
     disabled: uploading,
   });
 
-  const handleDelete = (imageId: string) => {
+  const handleDelete = async (imageId: string) => {
     if (state.currentDataset) {
       dispatch({ type: 'REMOVE_DATASET_IMAGE', payload: { datasetId: state.currentDataset.id, imageId } });
+      // Atomic server-side delete — avoids racing a full-dataset rewrite against concurrent edits
+      deleteImage(state.currentDataset.id, imageId).catch(err => console.error('Failed to delete image:', err));
     }
   };
 
@@ -146,6 +218,12 @@ export function DatasetSection() {
     if (bytes < 1024) return `${bytes} B`;
     if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
     return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+  };
+
+  const capToolInputStyle: React.CSSProperties = {
+    flex: 1, minWidth: 0, padding: '6px 10px', background: 'var(--color-bg-elevated)',
+    border: '1px solid var(--color-surface-border)', borderRadius: 'var(--radius-sm)',
+    color: 'var(--color-text-primary)', outline: 'none', fontSize: '12px',
   };
 
   return (
@@ -208,9 +286,55 @@ export function DatasetSection() {
                     </Button>
                   )}
                 </div>
-                <Button variant="outline" size="sm" onClick={handleAutoCaptionAll}>
-                  Auto Caption
-                </Button>
+                <div style={{ display: 'flex', gap: '8px' }}>
+                  <Button variant="ghost" size="sm" onClick={() => setShowCapTools(v => !v)}>
+                    Caption Tools
+                  </Button>
+                  <Button variant="outline" size="sm" onClick={handleAutoCaptionAll}>
+                    Auto Caption
+                  </Button>
+                </div>
+              </div>
+            )}
+
+            {/* Dataset validation hints */}
+            {images.length > 0 && (images.length < 5 || missingCaptions > 0) && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '6px', fontSize: '11px', color: 'var(--color-text-secondary)' }}>
+                {images.length < 5 && (
+                  <span style={{ color: 'var(--color-warning, #f59e0b)' }}>⚠ Recommended 5+ images for a stable LoRA (you have {images.length})</span>
+                )}
+                {missingCaptions > 0 && (
+                  <span>{missingCaptions} image{missingCaptions !== 1 ? 's' : ''} without a caption</span>
+                )}
+              </div>
+            )}
+
+            {/* Bulk caption tools — prepend a trigger word, append tokens, or find/replace across all images */}
+            {images.length > 0 && showCapTools && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', marginTop: '8px', padding: '8px', background: 'var(--color-bg-primary)', border: '1px solid var(--color-surface-border)', borderRadius: 'var(--radius-md)' }}>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input placeholder="Trigger / prepend to all…" value={prependText}
+                    onChange={e => setPrependText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handlePrependAll(); }}
+                    style={capToolInputStyle} />
+                  <Button variant="outline" size="sm" onClick={handlePrependAll}>Prepend</Button>
+                </div>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input placeholder="Append to all…" value={appendText}
+                    onChange={e => setAppendText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleAppendAll(); }}
+                    style={capToolInputStyle} />
+                  <Button variant="outline" size="sm" onClick={handleAppendAll}>Append</Button>
+                </div>
+                <div style={{ display: 'flex', gap: '6px' }}>
+                  <input placeholder="Find…" value={findText}
+                    onChange={e => setFindText(e.target.value)} style={capToolInputStyle} />
+                  <input placeholder="Replace (blank = remove)…" value={replaceText}
+                    onChange={e => setReplaceText(e.target.value)}
+                    onKeyDown={e => { if (e.key === 'Enter') handleFindReplaceAll(); }}
+                    style={capToolInputStyle} />
+                  <Button variant="outline" size="sm" onClick={handleFindReplaceAll}>Replace</Button>
+                </div>
               </div>
             )}
 

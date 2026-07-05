@@ -17,7 +17,7 @@ import { Badge } from '../components/ui/Badge';
 import { Modal } from '../components/ui/Modal';
 import { ProgressBar } from '../components/ui/ProgressBar';
 import { useApp } from '../context/AppContext';
-import { uploadImage, createDataset, autoCaptionImage, generateId } from '../services/api';
+import { uploadImage, createDataset, autoCaptionImage, updateDataset, generateId } from '../services/api';
 import type { DatasetImage } from '../types';
 import './DatasetPage.css';
 
@@ -42,6 +42,12 @@ export function DatasetPage() {
             payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
           });
           setPreviewImage({ ...previewImage, captions: newTags });
+          
+          const updatedDs = {
+            ...state.currentDataset,
+            images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
+          };
+          updateDataset(updatedDs).catch(console.error);
         }
         setTagInput('');
       }
@@ -56,6 +62,12 @@ export function DatasetPage() {
         payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
       });
       setPreviewImage({ ...previewImage, captions: newTags });
+
+      const updatedDs = {
+        ...state.currentDataset,
+        images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
+      };
+      updateDataset(updatedDs).catch(console.error);
     }
   };
 
@@ -77,6 +89,11 @@ export function DatasetPage() {
           type: 'UPDATE_DATASET_IMAGE_CAPTIONS',
           payload: { datasetId: ds.id, imageId: img.id, captions: tags }
         });
+        const updatedDs = {
+          ...state.currentDataset,
+          images: state.currentDataset.images.map(i => i.id === img.id ? { ...i, captions: tags } : i)
+        };
+        await updateDataset(updatedDs);
       } catch (err) {
         console.error('Captioning failed', err);
       } finally {
@@ -138,10 +155,12 @@ export function DatasetPage() {
 
   const handleDelete = (imageId: string) => {
     if (state.currentDataset) {
-      dispatch({
-        type: 'REMOVE_DATASET_IMAGE',
-        payload: { datasetId: state.currentDataset.id, imageId },
-      });
+      dispatch({ type: 'REMOVE_DATASET_IMAGE', payload: { datasetId: state.currentDataset.id, imageId } });
+      const updatedDs = {
+        ...state.currentDataset,
+        images: state.currentDataset.images.filter(i => i.id !== imageId)
+      };
+      updateDataset(updatedDs).catch(console.error);
     }
   };
 
