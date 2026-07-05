@@ -234,9 +234,24 @@ LoRA Studio is a local desktop tool. It starts a local HTTP API on `127.0.0.1:80
 
 Do not expose the backend port to a public network. Do not install or run model files from untrusted sources.
 
-## Release
+## Release and Auto-Update
 
-Current release: `1.0.0-beta.1`
+Current release: `1.0.0-beta.2`
+
+The packaged app auto-updates from GitHub Releases via `electron-updater`. On launch it checks the latest release, downloads a newer installer in the background, and offers a **Restart & Install** action (updates run only in the installed app, not in dev).
+
+To cut a release — builds the NSIS installer, generates `latest.yml`, and uploads both to a GitHub Release:
+
+1. Bump `version` in `package.json` (auto-update only triggers for a strictly higher version).
+2. Set a GitHub token (with `repo` scope) and publish:
+
+   ```powershell
+   $env:GH_TOKEN="<token>"; npm run electron:publish
+   ```
+
+`npm run electron:dist` builds the installer locally without publishing (output in `dist/release/`).
+
+The app is currently unsigned, so Windows SmartScreen warns on first install/update; adding code signing removes the warning.
 
 See `CHANGELOG.md` for version history.
 
