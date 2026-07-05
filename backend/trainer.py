@@ -763,15 +763,23 @@ class LoRATrainer:
         scheduler_type = config.get("scheduler", "cosine")
         
         from torch.optim.lr_scheduler import LambdaLR
-        
+
+        # The scheduler is stepped once per OPTIMIZER update (every grad_accum micro-steps),
+        # so the schedule must span the number of updates, not raw loop iterations — otherwise
+        # cosine decay only completes 1/grad_accum of the way through.
+        _grad_accum = max(1, config.get("gradientAccumulation", 1))
+        num_update_steps = max(1, math.ceil(total_steps / _grad_accum))
+
         def lr_lambda(current_step: int):
+            # current_step counts optimizer updates (LambdaLR increments on each .step()).
+            # warmup_steps is interpreted in optimizer-update units.
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
-            progress = float(current_step - warmup_steps) / float(max(1, total_steps - warmup_steps))
+            progress = float(current_step - warmup_steps) / float(max(1, num_update_steps - warmup_steps))
             if scheduler_type == "cosine":
                 return max(0.0, 0.5 * (1.0 + math.cos(math.pi * progress)))
             return 1.0
-        
+
         lr_scheduler = LambdaLR(optimizer, lr_lambda)
         
         # --- Training Loop Setup ---
@@ -780,13 +788,35 @@ class LoRATrainer:
         batch_size = min(config.get("batchSize", 1), opt_profile["max_batch_size"])
         grad_accum = config.get("gradientAccumulation", 1)
         generator = torch.Generator(device=device).manual_seed(seed)
-        
+        # Seed the global RNGs too so batch draws and timestep sampling are reproducible.
+        random.seed(seed)
+        torch.manual_seed(seed)
+
         shape_to_indices = {}
         for i in range(len(dataset)):
             shape = tuple(dataset.image_buckets[i])
             if shape not in shape_to_indices:
                 shape_to_indices[shape] = []
             shape_to_indices[shape].append(i)
+
+        # Draw a shape-homogeneous batch WITHOUT replacement; reshuffle a bucket once exhausted
+        # (= a new epoch for that bucket). Prevents the same image repeating within a batch,
+        # which was near-guaranteed overfitting on small datasets via random.choices().
+        _bucket_shapes = list(shape_to_indices.keys())
+        _bucket_queues = {s: [] for s in _bucket_shapes}
+        _bucket_weights = [len(shape_to_indices[s]) for s in _bucket_shapes]
+
+        def draw_batch():
+            shape = random.choices(_bucket_shapes, weights=_bucket_weights, k=1)[0]
+            need = min(batch_size, len(shape_to_indices[shape]))
+            picked = []
+            while len(picked) < need:
+                q = _bucket_queues[shape]
+                if not q:
+                    q = random.sample(shape_to_indices[shape], len(shape_to_indices[shape]))
+                    _bucket_queues[shape] = q
+                picked.append(q.pop())
+            return picked
         
         running_loss = 0.0
         best_loss = float("inf")
@@ -801,10 +831,7 @@ class LoRATrainer:
             if self._stop_requested: break
             self._current_step = step
             
-            idx_first = torch.randint(0, len(dataset), (1,)).item()
-            shape = tuple(dataset.image_buckets[idx_first])
-            pool = shape_to_indices[shape]
-            batch_indices = random.choices(pool, k=batch_size)
+            batch_indices = draw_batch()
             
             latents = torch.cat([cached_latents[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
             encoder_hidden_states = torch.cat([cached_text_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
@@ -817,7 +844,7 @@ class LoRATrainer:
                 time_ids = torch.tensor(
                     [bucket_h, bucket_w, 0, 0, bucket_h, bucket_w],
                     device=device, dtype=weight_dtype
-                ).unsqueeze(0).repeat(batch_size, 1)
+                ).unsqueeze(0).repeat(latents.shape[0], 1)
                 added_cond_kwargs = {"text_embeds": pooled_embeds, "time_ids": time_ids}
             
             noise = torch.randn(latents.shape, dtype=latents.dtype, device=latents.device, generator=generator)
@@ -834,7 +861,13 @@ class LoRATrainer:
             with torch.amp.autocast("cuda", dtype=weight_dtype):
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs=added_cond_kwargs).sample
             
-            loss = torch.nn.functional.mse_loss(noise_pred.float(), noise.float(), reduction="mean")
+            # Respect the scheduler's prediction type. SD2.x (and some SDXL variants) use
+            # v-prediction; targeting raw epsilon there silently degrades the model.
+            if noise_scheduler.config.prediction_type == "v_prediction":
+                target = noise_scheduler.get_velocity(latents, noise, timesteps)
+            else:
+                target = noise
+            loss = torch.nn.functional.mse_loss(noise_pred.float(), target.float(), reduction="mean")
             loss = loss / grad_accum
             loss.backward()
             

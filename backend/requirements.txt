@@ -1,14 +1,18 @@
-fastapi
-uvicorn[standard]
-websockets
-pydantic
-transformers
-Pillow
-aiohttp
-aiofiles
-psutil
-diffusers>=0.31.0
-peft>=0.13.0
-accelerate>=0.33.0
-safetensors
-omegaconf
+# Pinned to the versions the app was developed and tested against.
+# The compatibility patches in main.py / trainer.py target transformers/diffusers internals,
+# so bumping these can break model loading silently — update deliberately and re-test (P1-02).
+# NOTE: torch / torchvision are installed separately from the CUDA index (see backend_manager.ts).
+fastapi==0.136.1
+uvicorn[standard]==0.46.0
+websockets==16.0
+pydantic==2.13.3
+transformers==5.6.2
+Pillow==12.1.1
+aiohttp==3.13.5
+aiofiles==25.1.0
+psutil==7.2.2
+diffusers==0.37.1
+peft==0.19.1
+accelerate==1.13.0
+safetensors==0.7.0
+omegaconf==2.3.0

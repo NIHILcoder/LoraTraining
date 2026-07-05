@@ -7,7 +7,7 @@ import json
 import shutil
 import aiofiles
 from pathlib import Path
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Request, HTTPException
 from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel as PydanticBase
@@ -47,7 +47,7 @@ app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "app://."],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -64,7 +64,10 @@ async def verify_api_token(request: Request, call_next):
     path = request.url.path
     if path.startswith("/api/"):
         auth_header = request.headers.get("Authorization")
-        if not auth_header or not auth_header.startswith("Bearer ") or auth_header[7:] != API_TOKEN:
+        header_ok = bool(auth_header and auth_header.startswith("Bearer ") and auth_header[7:] == API_TOKEN)
+        # <img>/<a> requests cannot set headers, so accept a matching ?token= query param too
+        query_ok = request.query_params.get("token") == API_TOKEN
+        if not header_ok and not query_ok:
             return JSONResponse(status_code=401, content={"error": "Unauthorized"})
             
     return await call_next(request)
@@ -72,6 +75,20 @@ async def verify_api_token(request: Request, call_next):
 active_training_sessions = {}
 active_connections: list[WebSocket] = []
 active_downloads: dict[str, asyncio.Task] = {}
+
+def _log_dep_versions():
+    """Log tested dependency versions at startup so mismatches are visible (P1-02)."""
+    import importlib.metadata as _md
+    names = ["torch", "transformers", "diffusers", "peft", "accelerate", "safetensors", "fastapi", "pydantic"]
+    parts = []
+    for n in names:
+        try:
+            parts.append(f"{n}={_md.version(n)}")
+        except Exception:
+            parts.append(f"{n}=?")
+    print("[Startup] Dependency versions: " + ", ".join(parts))
+
+_log_dep_versions()
 
 # --- User Data & Paths (P0-03) ---
 BACKEND_DIR = Path(__file__).parent.resolve()
@@ -214,6 +231,10 @@ class TrainingConfig(PydanticBase):
     gradientAccumulation: int
     clipSkip: int
     warmupSteps: Optional[int] = 0
+    # Advanced knobs surfaced in the UI — must be declared or Pydantic silently drops them
+    enableBucketing: Optional[bool] = True
+    captionDropout: Optional[float] = 0.0
+    noiseOffset: Optional[float] = 0.0
     datasetId: Optional[str] = None
     baseModel: str
 
@@ -240,7 +261,161 @@ def get_output_dir() -> Path:
     DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
     return DEFAULT_OUTPUT_DIR
 
-ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade"]
+from fastapi import APIRouter
+from fastapi.responses import FileResponse
+
+dataset_router = APIRouter(prefix="/api/datasets")
+
+DATASETS_FILE = TRAINING_DATA_DIR / "datasets.json"
+
+def load_datasets():
+    if DATASETS_FILE.exists():
+        try:
+            return json.loads(DATASETS_FILE.read_text())
+        except Exception:
+            return {}
+    return {}
+
+def save_datasets(data):
+    DATASETS_FILE.write_text(json.dumps(data, indent=2))
+
+@dataset_router.get("")
+async def get_datasets():
+    datasets = load_datasets()
+    return list(datasets.values())
+
+class CreateDatasetReq(PydanticBase):
+    name: str
+
+@dataset_router.post("")
+async def create_dataset(req: CreateDatasetReq):
+    ds_id = str(uuid.uuid4())[:8]
+    ds = {
+        "id": ds_id,
+        "name": req.name,
+        "images": [],
+        "totalSize": 0,
+        "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    }
+    datasets = load_datasets()
+    datasets[ds_id] = ds
+    save_datasets(datasets)
+    return ds
+
+@dataset_router.delete("/{ds_id}")
+async def delete_dataset(ds_id: str):
+    datasets = load_datasets()
+    if ds_id in datasets:
+        del datasets[ds_id]
+        save_datasets(datasets)
+        ds_dir = TRAINING_DATA_DIR / ds_id
+        if ds_dir.exists():
+            shutil.rmtree(ds_dir, ignore_errors=True)
+    return {"status": "ok"}
+
+class UpdateDatasetReq(PydanticBase):
+    dataset: dict
+
+@dataset_router.put("/{ds_id}")
+async def update_dataset(ds_id: str, req: UpdateDatasetReq):
+    datasets = load_datasets()
+    if ds_id in datasets:
+        datasets[ds_id] = req.dataset
+        datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_datasets(datasets)
+        return datasets[ds_id]
+    raise HTTPException(status_code=404, detail="Dataset not found")
+
+class UploadLocalImageReq(PydanticBase):
+    filePath: str
+    filename: str
+    size: int
+
+@dataset_router.post("/{ds_id}/images/local")
+async def upload_local_image(ds_id: str, req: UploadLocalImageReq):
+    datasets = load_datasets()
+    if ds_id not in datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+        
+    ds_dir = TRAINING_DATA_DIR / ds_id / "images"
+    ds_dir.mkdir(parents=True, exist_ok=True)
+    
+    img_id = str(uuid.uuid4())[:8]
+    ext = Path(req.filePath).suffix
+    if not ext:
+        ext = ".jpg"
+    new_filename = f"{img_id}{ext}"
+    dest_path = ds_dir / new_filename
+    
+    try:
+        shutil.copy2(req.filePath, dest_path)
+    except Exception as e:
+        raise HTTPException(status_code=500, detail=f"Failed to copy file: {e}")
+        
+    # Read real image dimensions (previously hardcoded to 1024x1024, corrupting bucket metadata)
+    img_width, img_height = 0, 0
+    try:
+        from PIL import Image as _PILImage
+        with _PILImage.open(dest_path) as _im:
+            img_width, img_height = _im.size
+    except Exception:
+        pass
+
+    img_metadata = {
+        "id": img_id,
+        "filename": req.filename,
+        "url": f"/api/datasets/{ds_id}/images/{img_id}/raw",
+        "filePath": str(dest_path.resolve()),
+        "size": req.size,
+        "width": img_width,
+        "height": img_height,
+        "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "captions": []
+    }
+    
+    datasets[ds_id]["images"].append(img_metadata)
+    datasets[ds_id]["totalSize"] += req.size
+    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_datasets(datasets)
+    
+    return img_metadata
+
+@dataset_router.get("/{ds_id}/images/{img_id}/raw")
+async def get_image_raw(ds_id: str, img_id: str):
+    datasets = load_datasets()
+    if ds_id in datasets:
+        for img in datasets[ds_id]["images"]:
+            if img["id"] == img_id:
+                return FileResponse(img["filePath"])
+    raise HTTPException(status_code=404, detail="Not found")
+
+@dataset_router.delete("/{ds_id}/images/{img_id}")
+async def delete_dataset_image(ds_id: str, img_id: str):
+    """Delete a single image from a dataset (atomic on the server; no full-dataset rewrite race)."""
+    datasets = load_datasets()
+    if ds_id not in datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    ds = datasets[ds_id]
+    imgs = ds.get("images", [])
+    target = next((i for i in imgs if i.get("id") == img_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    try:
+        fp = target.get("filePath")
+        if fp and os.path.exists(fp):
+            os.remove(fp)
+    except Exception:
+        pass
+    ds["images"] = [i for i in imgs if i.get("id") != img_id]
+    ds["totalSize"] = max(0, ds.get("totalSize", 0) - int(target.get("size", 0) or 0))
+    ds["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_datasets(datasets)
+    return {"status": "ok"}
+
+app.include_router(dataset_router)
+
+ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl"]
 
 @app.get("/api/gpu/info")
 async def gpu_info():
@@ -277,7 +452,7 @@ async def estimate_time(req: EstimateRequest):
 @app.post("/api/training/start")
 async def start_training(req: TrainingStartRequest):
     if trainer_instance.is_training:
-        return {"error": "Training is already in progress"}
+        raise HTTPException(status_code=400, detail="Training is already in progress")
     
     config = req.config
     images = req.images
@@ -288,6 +463,14 @@ async def start_training(req: TrainingStartRequest):
     model_path = None
     arch = config.baseModel
     
+    if arch == "sd21":
+        raise HTTPException(
+            status_code=400,
+            detail="SD 2.1 training is temporarily disabled: it needs the OpenCLIP ViT-H text encoder and v-prediction loss, which are not implemented yet. Use SD 1.5 or SDXL.",
+        )
+    if arch not in ["sd15", "sdxl"]:
+        raise HTTPException(status_code=400, detail=f"Architecture '{arch}' is currently not supported for training.")
+        
     for m in MODEL_CATALOG:
         if m["architecture"] == arch:
             candidate = models_dir / m["filename"]
@@ -309,7 +492,7 @@ async def start_training(req: TrainingStartRequest):
             pass
     
     if not model_path:
-        return {"error": f"No downloaded base model found for architecture '{arch}'. Please download one from Models Hub."}
+        raise HTTPException(status_code=400, detail=f"No downloaded base model found for architecture '{arch}'. Please download one from Models Hub.")
     
     # Prepare dataset
     dataset_dir = TRAINING_DATA_DIR / session_id
@@ -360,11 +543,11 @@ async def stop_training(session_id: str):
 async def get_training_output(session_id: str):
     output_dir = get_output_dir() / session_id
     if not output_dir.exists():
-        return {"error": "Output not found"}
+        raise HTTPException(status_code=404, detail="Output not found")
     safetensors = list(output_dir.glob("*.safetensors"))
     if safetensors:
         return {"path": str(safetensors[0]), "dir": str(output_dir)}
-    return {"error": "No .safetensors file found"}
+    raise HTTPException(status_code=404, detail="No .safetensors file found")
 
 
 # ============================================
@@ -441,21 +624,21 @@ async def generate_image(req: GenerateRequest):
 
     # --- Real inference ---
     try:
-        pipe = await asyncio.to_thread(
-            _load_pipeline, model_path, lora_path, req.loraWeight, target_arch
-        )
+        # Serialize GPU work: the pipeline cache is shared and cleared on model switch,
+        # so concurrent generations must not race on it.
+        async with _inference_lock:
+            pipe = await asyncio.to_thread(
+                _load_pipeline, model_path, lora_path, req.loraWeight, target_arch
+            )
 
-        result_image = await asyncio.to_thread(
-            _run_inference, pipe, req, actual_seed
-        )
+            result_image = await asyncio.to_thread(
+                _run_inference, pipe, req, actual_seed
+            )
 
-        # Save to disk and return as data URL
         img_id = str(uuid.uuid4())[:8]
         img_path = GENERATED_DIR / f"{img_id}.png"
         meta_path = GENERATED_DIR / f"{img_id}.json"
-        
-        result_image.save(str(img_path), "PNG")
-        
+
         # Resolve names for metadata
         lora_name = "None"
         if req.loraModelId and req.loraModelId != "none":
@@ -463,7 +646,7 @@ async def generate_image(req: GenerateRequest):
             safetensors = list(lora_dir.glob("*.safetensors"))
             if safetensors:
                 lora_name = safetensors[0].stem.replace("_", " ").title()
-        
+
         base_name = "Auto"
         if req.baseModelId and req.baseModelId != "auto":
             for m in MODEL_CATALOG:
@@ -471,7 +654,22 @@ async def generate_image(req: GenerateRequest):
                     base_name = m["name"]
                     break
 
-        # Save metadata for Gallery
+        # Embed A1111/Civitai-compatible generation parameters into the PNG (PNG-info text chunk)
+        params_text = (
+            f"{req.prompt}\n"
+            f"Negative prompt: {req.negativePrompt or ''}\n"
+            f"Steps: {req.steps}, Sampler: {req.sampler}, CFG scale: {req.cfgScale}, "
+            f"Seed: {actual_seed}, Size: {req.width}x{req.height}, Model: {base_name}"
+        )
+        if lora_name and lora_name != "None":
+            params_text += f", LoRA: {lora_name}:{req.loraWeight}"
+
+        from PIL.PngImagePlugin import PngInfo
+        png_info = PngInfo()
+        png_info.add_text("parameters", params_text)
+        result_image.save(str(img_path), "PNG", pnginfo=png_info)
+
+        # Save sidecar metadata for the Gallery
         image_meta = {
             "id": img_id,
             "prompt": req.prompt,
@@ -491,17 +689,14 @@ async def generate_image(req: GenerateRequest):
         }
         meta_path.write_text(json.dumps(image_meta, indent=2))
 
-        buffered = io.BytesIO()
-        result_image.save(buffered, format="PNG")
-        img_b64 = base64.b64encode(buffered.getvalue()).decode()
-        data_url = f"data:image/png;base64,{img_b64}"
-
-        return {"url": data_url, "seed": actual_seed, "mock": False}
+        # Return a served URL (not a multi-MB base64 payload); the frontend adds origin + token.
+        return {"url": f"/api/generated/{img_id}.png", "seed": actual_seed, "mock": False}
 
     except Exception as e:
         print(f"[Inference] Error: {e}")
         svg = _make_mock_svg(req.prompt, actual_seed, req.sampler, None, f"Inference error: {str(e)[:80]}")
-        return {"url": svg, "seed": actual_seed, "mock": True, "reason": str(e)}
+        # Real inference failure — flag it so the UI can distinguish from a no-GPU simulation
+        return {"url": svg, "seed": actual_seed, "mock": True, "error": True, "reason": str(e)}
 
 def _module_has_meta(module) -> bool:
     """Return True if a torch module contains meta tensors."""
@@ -737,7 +932,8 @@ def _run_inference(pipe, req: GenerateRequest, seed: int):
         guidance_scale=req.cfgScale,
         num_inference_steps=req.steps,
         generator=generator,
-        cross_attention_kwargs={"scale": req.loraWeight} if req.loraWeight != 1.0 else None,
+        # LoRA weight is already applied via pipe.set_adapters(...) in _load_pipeline;
+        # passing a cross_attention scale here as well would double-scale it.
     )
     return result.images[0]
 
@@ -745,8 +941,13 @@ def _run_inference(pipe, req: GenerateRequest, seed: int):
 def _make_mock_svg(prompt: str, seed: int, sampler: str, lora_weight, reason: str) -> str:
     """Generate an informative SVG placeholder when inference can't run."""
     import urllib.parse
+    from xml.sax.saxutils import escape
     prompt_short = (prompt[:55] + "…") if len(prompt) > 55 else prompt
     lora_line = f"LoRA Weight: {lora_weight} | {sampler}" if lora_weight is not None else f"No LoRA | {sampler}"
+    # Escape any user prompt / exception text before it is interpolated into SVG/XML markup
+    prompt_short = escape(prompt_short)
+    lora_line = escape(lora_line)
+    reason = escape(reason)
 
     svg = f'''<svg xmlns="http://www.w3.org/2000/svg" width="512" height="512" viewBox="0 0 512 512">
   <defs>
@@ -794,7 +995,7 @@ async def auto_caption(req: CaptionRequest):
             print(f"Failed to load BLIP model: {e}")
             processor = None
             blip_model = None
-            return {"tags": ["model failed to load"]}
+            raise HTTPException(status_code=503, detail=f"Captioning model failed to load: {e}")
 
     try:
         from PIL import Image
@@ -802,7 +1003,7 @@ async def auto_caption(req: CaptionRequest):
         
         # Load local image using the path passed from Electron
         if not req.imageUrl or not os.path.exists(req.imageUrl):
-             return {"tags": ["file not found locally"]}
+             raise HTTPException(status_code=400, detail="Image file not found locally")
 
         raw_image = Image.open(req.imageUrl).convert('RGB')
         
@@ -850,9 +1051,69 @@ async def auto_caption(req: CaptionRequest):
         
         return {"tags": final_tags}
         
+    except HTTPException:
+        raise
     except Exception as e:
         print("Captioning error:", e)
-        return {"tags": ["error"]}
+        raise HTTPException(status_code=500, detail=f"Captioning failed: {e}")
+
+
+class BatchCaptionRequest(PydanticBase):
+    images: List[dict]  # [{imageId, imageUrl}]
+
+def _caption_image_file(image_path: str) -> list:
+    """Caption a single local image with BLIP (assumes the model is already loaded)."""
+    from PIL import Image
+    if not image_path or not os.path.exists(image_path):
+        raise HTTPException(status_code=400, detail="Image file not found locally")
+    raw_image = Image.open(image_path).convert("RGB")
+    inputs = processor(raw_image, return_tensors="pt")
+    out = blip_model.generate(
+        **inputs, max_new_tokens=50, num_return_sequences=3,
+        do_sample=True, top_k=30, temperature=0.7,
+    )
+    captions = processor.batch_decode(out, skip_special_tokens=True)
+    stop_words = {
+        "a", "an", "the", "and", "but", "or", "for", "nor", "on", "at", "in", "with", "by", "from",
+        "up", "about", "into", "over", "after", "is", "are", "was", "were", "be", "been", "being",
+        "have", "has", "had", "do", "does", "did", "of", "to", "it", "that", "this", "there", "their",
+        "they", "he", "she", "his", "her", "him", "its", "some", "many", "few", "all", "any", "no",
+        "not", "very", "too", "so", "just", "can", "will", "would", "could", "should", "what", "which",
+        "who", "when", "where", "why", "how", "background", "foreground", "picture", "image", "photo",
+        "photography", "showing", "view", "close", "standing", "sitting", "looking",
+    }
+    keyword_set = set()
+    for cap in captions:
+        for w in (x.strip(".,!?\"'()[]") for x in cap.lower().split()):
+            if len(w) > 2 and w not in stop_words and not w.isdigit():
+                keyword_set.add(w)
+    return [captions[0]] + sorted(keyword_set)
+
+@app.post("/api/dataset/caption/batch")
+async def auto_caption_batch(req: BatchCaptionRequest):
+    """Caption many images in one request; per-image failures are reported, not fatal."""
+    global processor, blip_model
+    if processor is None or blip_model is None:
+        from transformers import BlipProcessor, BlipForConditionalGeneration
+        try:
+            processor = BlipProcessor.from_pretrained("Salesforce/blip-image-captioning-base")
+            blip_model = BlipForConditionalGeneration.from_pretrained(
+                "Salesforce/blip-image-captioning-base", use_safetensors=True,
+            )
+        except Exception as e:
+            raise HTTPException(status_code=503, detail=f"Captioning model failed to load: {e}")
+    results = []
+    for item in req.images:
+        image_id = item.get("imageId")
+        image_url = item.get("imageUrl")
+        try:
+            tags = await asyncio.to_thread(_caption_image_file, image_url)
+            results.append({"imageId": image_id, "tags": tags})
+        except HTTPException as he:
+            results.append({"imageId": image_id, "error": he.detail})
+        except Exception as e:
+            results.append({"imageId": image_id, "error": str(e)})
+    return {"results": results}
 
 
 
@@ -1076,7 +1337,14 @@ async def add_custom_model(req: CustomModelRequest):
     
     # Extract filename from URL
     filename = url.split("/")[-1].split("?")[0]
-    if not filename.endswith((".safetensors", ".ckpt", ".bin", ".pt")):
+    # Refuse pickle-based formats: torch.load's safety check is bypassed in this app,
+    # so a malicious .ckpt/.bin/.pt from an arbitrary URL could execute code on load.
+    if filename.endswith((".ckpt", ".bin", ".pt")):
+        raise HTTPException(
+            status_code=400,
+            detail="Only .safetensors models can be added. .ckpt/.bin/.pt use Python pickle, which can run arbitrary code when loaded.",
+        )
+    if not filename.endswith(".safetensors"):
         filename += ".safetensors"
     
     model_id = f"custom-{uuid.uuid4().hex[:8]}"
@@ -1106,7 +1374,70 @@ async def add_custom_model(req: CustomModelRequest):
     custom_models.append(custom_model)
     existing["customModels"] = custom_models
     SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
-    
+
+    return custom_model
+
+class ImportLocalModelReq(PydanticBase):
+    filePath: str
+    name: Optional[str] = None
+    architecture: Optional[str] = "sd15"
+
+@app.post("/api/models/base/import")
+async def import_local_model(req: ImportLocalModelReq):
+    """Register an existing local .safetensors file as a base model (copies it into the models dir)."""
+    src = Path(req.filePath)
+    if not src.exists() or not src.is_file():
+        raise HTTPException(status_code=400, detail="File not found.")
+    if src.suffix.lower() != ".safetensors":
+        raise HTTPException(status_code=400, detail="Only .safetensors models can be imported.")
+
+    models_dir = get_models_dir()
+    models_dir.mkdir(parents=True, exist_ok=True)
+    dest = models_dir / src.name
+
+    # Disk-space precheck (unless the file is already in place)
+    try:
+        size = src.stat().st_size
+        if not dest.exists() and shutil.disk_usage(str(models_dir)).free < size * 1.05:
+            raise HTTPException(status_code=507, detail="Not enough disk space to import this model.")
+    except HTTPException:
+        raise
+    except Exception:
+        pass
+
+    if src.resolve() != dest.resolve():
+        try:
+            shutil.copy2(str(src), str(dest))
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to copy file: {e}")
+
+    model_id = f"custom-{uuid.uuid4().hex[:8]}"
+    name = req.name or src.stem.replace(".", " ").replace("_", " ").replace("-", " ").title()
+    custom_model = {
+        "id": model_id,
+        "name": name,
+        "shortName": name[:12],
+        "description": f"Imported from: {src.name}",
+        "architecture": req.architecture or "sd15",
+        "fileSize": dest.stat().st_size if dest.exists() else 0,
+        "filename": dest.name,
+        "downloadUrl": "",
+        "isCustom": True,
+        "status": "downloaded",
+        "localPath": str(dest),
+    }
+
+    existing = {}
+    if SETTINGS_FILE.exists():
+        try:
+            existing = json.loads(SETTINGS_FILE.read_text())
+        except Exception:
+            pass
+    custom_models = existing.get("customModels", [])
+    custom_models.append(custom_model)
+    existing["customModels"] = custom_models
+    SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+
     return custom_model
 
 @app.post("/api/models/base/{model_id}/download")
@@ -1132,13 +1463,28 @@ async def download_model(model_id: str):
             pass
     
     if not model_info:
-        return {"error": "Model not found"}
+        raise HTTPException(status_code=404, detail="Model not found")
     
     models_dir = get_models_dir()
     models_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    # Disk-space precheck — model files are 4–24 GB; fail early with a clear message
+    expected = int(model_info.get("fileSize") or 0)
+    if expected > 0:
+        try:
+            free = shutil.disk_usage(str(models_dir)).free
+            if free < expected * 1.05:
+                raise HTTPException(
+                    status_code=507,
+                    detail=f"Not enough disk space: need ~{expected / 1024**3:.1f} GB, only {free / 1024**3:.1f} GB free at {models_dir}.",
+                )
+        except HTTPException:
+            raise
+        except Exception:
+            pass  # disk_usage failure shouldn't block the download
+
     task = asyncio.create_task(
-        run_download(model_id, model_info["downloadUrl"], model_info["filename"], models_dir)
+        run_download(model_id, model_info["downloadUrl"], model_info["filename"], models_dir, model_info.get("sha256"))
     )
     active_downloads[model_id] = task
     return {"status": "started"}
@@ -1188,7 +1534,7 @@ async def delete_model_file(model_id: str):
         except Exception:
             pass
     
-    return {"error": "Model not found"}
+    raise HTTPException(status_code=404, detail="Model not found")
 
 class SetDirectoryRequest(PydanticBase):
     path: str
@@ -1199,7 +1545,7 @@ async def set_models_directory(req: SetDirectoryRequest):
     try:
         target.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        return {"error": f"Cannot create directory: {e}"}
+        raise HTTPException(status_code=500, detail=f"Cannot create directory: {e}")
     save_settings({"modelsDirectory": str(target)})
     return {"status": "ok", "modelsDirectory": str(target)}
 
@@ -1221,12 +1567,13 @@ async def get_hf_token():
     masked = (token[:4] + "*" * (len(token) - 4)) if len(token) > 4 else ""
     return {"token": masked, "hasToken": bool(token)}
 
-async def run_download(model_id: str, url: str, filename: str, models_dir: Path):
-    """Download a model file with real-time progress broadcasting."""
+async def run_download(model_id: str, url: str, filename: str, models_dir: Path, expected_sha: Optional[str] = None):
+    """Download a model file with resume support, optional SHA256 verification, and progress broadcasting."""
     import aiohttp
     import aiofiles
     import shutil
-    
+    import hashlib
+
     part_path = models_dir / (filename + ".part")
     final_path = models_dir / filename
     
@@ -1254,28 +1601,46 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
             headers["Authorization"] = f"Bearer {hf_token}"
             print(f"[Download] Using HuggingFace Token for gated repo: {url}")
 
+        # Resume: continue from an existing .part file if one is present
+        resume_from = part_path.stat().st_size if part_path.exists() else 0
+        if resume_from > 0:
+            headers["Range"] = f"bytes={resume_from}-"
+            print(f"[Download] Found partial file ({resume_from} bytes) — attempting resume.")
+
         async with aiohttp.ClientSession(headers=headers) as session:
             print(f"[Download] Starting request to: {url}")
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=None), allow_redirects=True) as response:
                 print(f"[Download] Response status: {response.status} for {url}")
-                if response.status != 200:
+                if response.status not in (200, 206):
                     error_msg = f"HTTP {response.status}: {response.reason}"
                     print(f"[Download] Error: {error_msg} for URL: {url}")
                     # Special check for 401/404 on HF which might mean gated
                     if response.status in [401, 403, 404] and "huggingface.co" in url and not hf_token:
                         error_msg += " (Token might be required)"
-                    
+
                     await broadcast_to_connections({
                         "type": "download_error",
                         "data": {"modelId": model_id, "message": error_msg}
                     })
                     return
-                
-                total_size = int(response.headers.get("Content-Length", 0))
-                
-                # Integrity check: model files should be > 10MB (most are > 2GB)
-                # If it's small, it's likely an HTML error page
-                if total_size < 10 * 1024 * 1024:
+
+                # Server ignored the Range request and is sending the whole file — restart cleanly
+                if resume_from > 0 and response.status == 200:
+                    print("[Download] Server does not support resume; restarting from scratch.")
+                    resume_from = 0
+
+                # Determine the full expected size
+                if response.status == 206:
+                    content_range = response.headers.get("Content-Range", "")
+                    try:
+                        total_size = int(content_range.rsplit("/", 1)[-1])
+                    except (ValueError, IndexError):
+                        total_size = resume_from + int(response.headers.get("Content-Length", 0))
+                else:
+                    total_size = int(response.headers.get("Content-Length", 0))
+
+                # Integrity check only on a fresh full download (a resumed remainder can be small)
+                if resume_from == 0 and total_size < 10 * 1024 * 1024:
                     error_msg = "Downloaded file is too small. Possibly an invalid URL or restricted access."
                     print(f"[Download] Error: {error_msg} (Size: {total_size} bytes)")
                     await broadcast_to_connections({
@@ -1283,24 +1648,36 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                         "data": {"modelId": model_id, "message": error_msg}
                     })
                     return
-                    
-                downloaded = 0
+
+                # Prepare hash only when we actually intend to verify
+                sha = hashlib.sha256() if expected_sha else None
+                if sha and resume_from > 0:
+                    async with aiofiles.open(part_path, mode="rb") as pf:
+                        while True:
+                            block = await pf.read(1024 * 1024)
+                            if not block:
+                                break
+                            sha.update(block)
+
+                downloaded = resume_from
                 last_broadcast = 0
                 start_time = time.time()
                 chunk_times = []
-                
-                print(f"[Download] Total size: {total_size / (1024**3):.2f} GB")
-                
-                # Use aiofiles for non-blocking disk I/O
-                async with aiofiles.open(part_path, mode="wb") as f:
+
+                print(f"[Download] Total size: {total_size / (1024**3):.2f} GB (resuming from {resume_from} bytes)")
+
+                # Use aiofiles for non-blocking disk I/O; append when resuming
+                async with aiofiles.open(part_path, mode=("ab" if resume_from > 0 else "wb")) as f:
                     async for chunk in response.content.iter_chunked(1024 * 1024):  # 1MB chunks
                         if model_id not in active_downloads:
                             print(f"[Download] Interrupted: {model_id}")
                             break
                         
                         await f.write(chunk)
+                        if sha:
+                            sha.update(chunk)
                         downloaded += len(chunk)
-                        
+
                         # Track speed
                         now = time.time()
                         chunk_times.append((now, len(chunk)))
@@ -1334,7 +1711,22 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
                 if model_id in active_downloads:
                     if total_size > 0 and downloaded < total_size:
                         raise Exception(f"Download incomplete: {downloaded}/{total_size} bytes")
-                    
+
+                    # Verify checksum when an expected digest is known
+                    if sha and expected_sha:
+                        digest = sha.hexdigest()
+                        if digest.lower() != expected_sha.lower():
+                            if part_path.exists():
+                                part_path.unlink()
+                            error_msg = f"Checksum mismatch: expected {expected_sha[:12]}…, got {digest[:12]}…"
+                            print(f"[Download] {error_msg}")
+                            await broadcast_to_connections({
+                                "type": "download_error",
+                                "data": {"modelId": model_id, "message": error_msg}
+                            })
+                            return
+                        print(f"[Download] SHA256 verified: {digest[:12]}…")
+
                     print(f"[Download] Finishing: {filename}...")
                     
                     # Small delay to let OS release file handles on Windows
@@ -1363,11 +1755,7 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path)
             "type": "download_error",
             "data": {"modelId": model_id, "message": error_msg}
         })
-        if part_path.exists():
-            try:
-                part_path.unlink()
-            except:
-                pass
+        # Keep the .part file so the next download attempt can resume instead of restarting.
     finally:
         active_downloads.pop(model_id, None)
 
@@ -1451,37 +1839,38 @@ async def list_trained_models():
 @app.delete("/api/gallery/models/{model_id}")
 async def delete_trained_model(model_id: str):
     """Delete a trained LoRA model and its directory."""
-    model_dir = get_output_dir() / model_id
-    if not model_dir.exists():
-        return {"error": "Model not found"}
-    
+    target = get_output_dir() / model_id
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Model not found")
+        
     try:
-        shutil.rmtree(str(model_dir))
-        return {"status": "deleted"}
+        import shutil
+        shutil.rmtree(target)
+        return {"status": "ok"}
     except Exception as e:
-        return {"error": f"Failed to delete: {e}"}
+        raise HTTPException(status_code=500, detail=f"Failed to delete: {e}")
 
 
 @app.post("/api/gallery/models/{model_id}/open")
 async def open_model_folder(model_id: str):
     """Open the model folder in the system file explorer."""
-    model_dir = get_output_dir() / model_id
-    if not model_dir.exists():
-        return {"error": "Model folder not found"}
+    target = get_output_dir() / model_id
+    if not target.exists():
+        raise HTTPException(status_code=404, detail="Model folder not found")
     
     import subprocess
     import sys
     
     try:
         if sys.platform == "win32":
-            subprocess.Popen(["explorer", str(model_dir)])
+            os.startfile(target)
         elif sys.platform == "darwin":
-            subprocess.Popen(["open", str(model_dir)])
+            subprocess.Popen(["open", target])
         else:
-            subprocess.Popen(["xdg-open", str(model_dir)])
-        return {"status": "opened"}
+            subprocess.Popen(["xdg-open", target])
+        return {"status": "ok"}
     except Exception as e:
-        return {"error": f"Failed to open folder: {e}"}
+        raise HTTPException(status_code=500, detail=f"Failed to open folder: {e}")
 
 
 @app.get("/api/gallery/images")
@@ -1511,7 +1900,7 @@ async def list_generated_images():
             }
             
         # Add file info
-        metadata["url"] = f"http://localhost:8000/api/generated/{img_id}.png"
+        metadata["url"] = f"/api/generated/{img_id}.png"
         metadata["path"] = str(img_file)
         
         images.append(metadata)
@@ -1531,7 +1920,7 @@ async def delete_generated_image(image_id: str):
             meta_file.unlink()
         return {"success": True}
     except Exception as e:
-        return {"error": str(e)}
+        raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/generated/{filename}")
 async def get_generated_image(filename: str):
@@ -1539,7 +1928,7 @@ async def get_generated_image(filename: str):
     from fastapi.responses import FileResponse
     file_path = GENERATED_DIR / filename
     if not file_path.exists():
-        return {"error": "File not found"}
+        raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(file_path))
 
 
@@ -1559,7 +1948,7 @@ async def set_output_directory(req: SetDirectoryRequest):
     try:
         target.mkdir(parents=True, exist_ok=True)
     except Exception as e:
-        return {"error": f"Cannot create directory: {e}"}
+        raise HTTPException(status_code=500, detail=f"Cannot create directory: {e}")
     save_settings({"outputDirectory": str(target)})
     return {"status": "ok", "outputDirectory": str(target)}
 
@@ -1581,4 +1970,4 @@ async def open_output_directory():
             subprocess.Popen(["xdg-open", str(output_dir)])
         return {"status": "opened", "outputDirectory": str(output_dir)}
     except Exception as e:
-        return {"error": f"Failed to open folder: {e}"}
+        raise HTTPException(status_code=500, detail=f"Failed to open folder: {e}")
