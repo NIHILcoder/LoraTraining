@@ -17,37 +17,33 @@ os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["ACCELERATE_USE_CPU_INIT"] = "0"
 
-# --- CRITICAL PATCHES FOR LIBRARIES ---
-def bypass_check():
-    return None
-
-# 1. Fixes: AttributeError: 'CLIPTextModel' object has no attribute 'text_model'
+# CLIPTextModel shim only — do not disable torch.load pickle checks.
 try:
     from transformers.models.clip.modeling_clip import CLIPTextModel
     if not hasattr(CLIPTextModel, "text_model"):
         CLIPTextModel.text_model = property(lambda self: self)
-except Exception: pass
+except Exception:
+    pass
 
-# 2. Fixes: ValueError: Due to a serious vulnerability issue in `torch.load`...
-try:
-    import transformers.utils.import_utils
-    transformers.utils.import_utils.check_torch_load_is_safe = bypass_check
-    import transformers.modeling_utils
-    transformers.modeling_utils.check_torch_load_is_safe = bypass_check
-except Exception: pass
-
-# 3. Force disable low_cpu_mem_usage globally in transformers
 try:
     import transformers.modeling_utils
     transformers.modeling_utils._CONFIG_FOR_LOW_CPU_MEM_USAGE = False
-except Exception: pass
+except Exception:
+    pass
 # ----------------------------------------
 
 app = FastAPI()
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "app://."],
+    allow_origins=[
+        "http://localhost:3005",
+        "http://127.0.0.1:3005",
+        "http://localhost:5173",
+        "http://127.0.0.1:5173",
+        "app://.",
+        "null",
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -107,6 +103,16 @@ TRAINING_DATA_DIR.mkdir(parents=True, exist_ok=True)
 DEFAULT_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
+ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
+
+def assert_under(root: Path, candidate: Path) -> Path:
+    """Resolve candidate and require it to sit under root (blocks path traversal)."""
+    root_r = root.resolve()
+    path = candidate.resolve()
+    if path != root_r and not path.is_relative_to(root_r):
+        raise HTTPException(status_code=400, detail="Invalid path")
+    return path
+
 def get_models_dir() -> Path:
     if SETTINGS_FILE.exists():
         try:
@@ -139,6 +145,18 @@ def save_secrets(data: dict):
     SECRETS_FILE.write_text(json.dumps(existing, indent=2))
 
 
+# Architectures this build can actually train / generate with.
+TRAINING_ARCHITECTURES = {"sd15", "sdxl"}
+INFERENCE_ARCHITECTURES = {"sd15", "sd21", "sdxl"}
+
+def apply_arch_support(model: dict) -> dict:
+    """Fill supportedTraining / supportedInference from architecture when missing."""
+    arch = model.get("architecture", "sd15")
+    model.setdefault("supportedTraining", arch in TRAINING_ARCHITECTURES)
+    model.setdefault("supportedInference", arch in INFERENCE_ARCHITECTURES)
+    return model
+
+
 # --- Base Model Catalog ---
 MODEL_CATALOG = [
     {
@@ -149,7 +167,10 @@ MODEL_CATALOG = [
         "architecture": "sd15",
         "fileSize": 4265380864,
         "filename": "v1-5-pruned-emaonly.safetensors",
-        "downloadUrl": "https://huggingface.co/runwayml/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors",
+        "downloadUrl": "https://huggingface.co/stable-diffusion-v1-5/stable-diffusion-v1-5/resolve/main/v1-5-pruned-emaonly.safetensors",
+        "sha256": "6ce0161689b3853acaa03779ec93eafe75a02f4ced659bee03f50797806fa2fa",
+        "supportedTraining": True,
+        "supportedInference": True,
     },
     {
         "id": "sd21",
@@ -160,6 +181,8 @@ MODEL_CATALOG = [
         "fileSize": 5214865152,
         "filename": "v2-1_768-ema-pruned.safetensors",
         "downloadUrl": "https://civitai.com/api/download/models/130072",
+        "supportedTraining": False,
+        "supportedInference": True,
     },
     {
         "id": "sdxl10",
@@ -170,6 +193,9 @@ MODEL_CATALOG = [
         "fileSize": 6938078334,
         "filename": "sd_xl_base_1.0.safetensors",
         "downloadUrl": "https://huggingface.co/stabilityai/stable-diffusion-xl-base-1.0/resolve/main/sd_xl_base_1.0.safetensors",
+        "sha256": "31e35c80fc4829d14f90153f4c74cd59c90b779f6afe05a74cd6120b893f7e5b",
+        "supportedTraining": True,
+        "supportedInference": True,
     },
     {
         "id": "sd3-medium",
@@ -180,6 +206,8 @@ MODEL_CATALOG = [
         "fileSize": 4339718720,
         "filename": "sd3_medium_incl_clips_t5xxlfp8.safetensors",
         "downloadUrl": "https://huggingface.co/Kijai/sd3-models/resolve/main/sd3_medium_incl_clips_t5xxlfp8.safetensors",
+        "supportedTraining": False,
+        "supportedInference": False,
     },
     {
         "id": "flux-dev",
@@ -190,6 +218,8 @@ MODEL_CATALOG = [
         "fileSize": 23802932552,
         "filename": "flux1-dev.safetensors",
         "downloadUrl": "https://huggingface.co/black-forest-labs/FLUX.1-dev/resolve/main/flux1-dev.safetensors",
+        "supportedTraining": False,
+        "supportedInference": False,
     },
     {
         "id": "flux-schnell",
@@ -200,6 +230,8 @@ MODEL_CATALOG = [
         "fileSize": 23802932552,
         "filename": "flux1-schnell.safetensors",
         "downloadUrl": "https://huggingface.co/black-forest-labs/FLUX.1-schnell/resolve/main/flux1-schnell.safetensors",
+        "supportedTraining": False,
+        "supportedInference": False,
     },
     {
         "id": "cascade-stage-c",
@@ -210,6 +242,8 @@ MODEL_CATALOG = [
         "fileSize": 9156923392,
         "filename": "stage_c_bf16.safetensors",
         "downloadUrl": "https://huggingface.co/stabilityai/stable-cascade/resolve/main/stage_c_bf16.safetensors",
+        "supportedTraining": False,
+        "supportedInference": False,
     },
 ]
 
@@ -309,7 +343,7 @@ async def delete_dataset(ds_id: str):
     if ds_id in datasets:
         del datasets[ds_id]
         save_datasets(datasets)
-        ds_dir = TRAINING_DATA_DIR / ds_id
+        ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id)
         if ds_dir.exists():
             shutil.rmtree(ds_dir, ignore_errors=True)
     return {"status": "ok"}
@@ -338,18 +372,25 @@ async def upload_local_image(ds_id: str, req: UploadLocalImageReq):
     if ds_id not in datasets:
         raise HTTPException(status_code=404, detail="Dataset not found")
         
-    ds_dir = TRAINING_DATA_DIR / ds_id / "images"
+    ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id) / "images"
     ds_dir.mkdir(parents=True, exist_ok=True)
-    
+
+    src = Path(req.filePath)
+    try:
+        src = src.resolve()
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid file path")
+    if not src.is_file():
+        raise HTTPException(status_code=400, detail="File not found")
+    ext = src.suffix.lower()
+    if ext not in ALLOWED_IMAGE_EXT:
+        raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WEBP images can be added.")
+
     img_id = str(uuid.uuid4())[:8]
-    ext = Path(req.filePath).suffix
-    if not ext:
-        ext = ".jpg"
-    new_filename = f"{img_id}{ext}"
-    dest_path = ds_dir / new_filename
+    dest_path = ds_dir / f"{img_id}{ext}"
     
     try:
-        shutil.copy2(req.filePath, dest_path)
+        shutil.copy2(str(src), dest_path)
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Failed to copy file: {e}")
         
@@ -387,8 +428,50 @@ async def get_image_raw(ds_id: str, img_id: str):
     if ds_id in datasets:
         for img in datasets[ds_id]["images"]:
             if img["id"] == img_id:
-                return FileResponse(img["filePath"])
+                fp = Path(img["filePath"])
+                safe = assert_under(TRAINING_DATA_DIR, fp)
+                return FileResponse(str(safe))
     raise HTTPException(status_code=404, detail="Not found")
+
+class PatchImageCaptionsReq(PydanticBase):
+    captions: List[str]
+
+@dataset_router.patch("/{ds_id}/images/{img_id}/captions")
+async def patch_image_captions(ds_id: str, img_id: str, req: PatchImageCaptionsReq):
+    """Update captions for a single image without rewriting the rest of the dataset."""
+    datasets = load_datasets()
+    if ds_id not in datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    target = next((i for i in datasets[ds_id].get("images", []) if i.get("id") == img_id), None)
+    if target is None:
+        raise HTTPException(status_code=404, detail="Image not found")
+    target["captions"] = req.captions
+    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_datasets(datasets)
+    return target
+
+class CaptionUpdateItem(PydanticBase):
+    imageId: str
+    captions: List[str]
+
+class PatchManyCaptionsReq(PydanticBase):
+    updates: List[CaptionUpdateItem]
+
+@dataset_router.patch("/{ds_id}/captions")
+async def patch_many_captions(ds_id: str, req: PatchManyCaptionsReq):
+    """Update captions for many images without replacing the rest of the dataset."""
+    datasets = load_datasets()
+    if ds_id not in datasets:
+        raise HTTPException(status_code=404, detail="Dataset not found")
+    by_id = {i.get("id"): i for i in datasets[ds_id].get("images", [])}
+    for u in req.updates:
+        if u.imageId not in by_id:
+            raise HTTPException(status_code=404, detail=f"Image not found: {u.imageId}")
+    for u in req.updates:
+        by_id[u.imageId]["captions"] = u.captions
+    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    save_datasets(datasets)
+    return {"status": "ok", "updated": len(req.updates)}
 
 @dataset_router.delete("/{ds_id}/images/{img_id}")
 async def delete_dataset_image(ds_id: str, img_id: str):
@@ -403,8 +486,12 @@ async def delete_dataset_image(ds_id: str, img_id: str):
         raise HTTPException(status_code=404, detail="Image not found")
     try:
         fp = target.get("filePath")
-        if fp and os.path.exists(fp):
-            os.remove(fp)
+        if fp:
+            safe = assert_under(TRAINING_DATA_DIR, Path(fp))
+            if safe.is_file():
+                safe.unlink()
+    except HTTPException:
+        pass
     except Exception:
         pass
     ds["images"] = [i for i in imgs if i.get("id") != img_id]
@@ -415,7 +502,7 @@ async def delete_dataset_image(ds_id: str, img_id: str):
 
 app.include_router(dataset_router)
 
-ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl"]
+ALL_ARCHITECTURES = ["sd15", "sd21", "sdxl", "sd3", "flux", "cascade"]
 
 @app.get("/api/gpu/info")
 async def gpu_info():
@@ -468,7 +555,7 @@ async def start_training(req: TrainingStartRequest):
             status_code=400,
             detail="SD 2.1 training is temporarily disabled: it needs the OpenCLIP ViT-H text encoder and v-prediction loss, which are not implemented yet. Use SD 1.5 or SDXL.",
         )
-    if arch not in ["sd15", "sdxl"]:
+    if arch not in TRAINING_ARCHITECTURES:
         raise HTTPException(status_code=400, detail=f"Architecture '{arch}' is currently not supported for training.")
         
     for m in MODEL_CATALOG:
@@ -512,6 +599,8 @@ async def start_training(req: TrainingStartRequest):
         "output_dir": str(output_dir),
         "task": None,
     }
+    # Launch from HTTP so training does not depend on a live WebSocket message.
+    _ensure_training_task(session_id)
     
     return {"sessionId": session_id}
 
@@ -608,7 +697,7 @@ async def generate_image(req: GenerateRequest):
     # --- Resolve LoRA path ---
     lora_path = None
     if req.loraModelId and req.loraModelId != "none":
-        lora_dir = get_output_dir() / req.loraModelId
+        lora_dir = assert_under(get_output_dir(), get_output_dir() / req.loraModelId)
         safetensors = list(lora_dir.glob("*.safetensors")) if lora_dir.exists() else []
         if safetensors:
             lora_path = str(safetensors[0])
@@ -642,7 +731,7 @@ async def generate_image(req: GenerateRequest):
         # Resolve names for metadata
         lora_name = "None"
         if req.loraModelId and req.loraModelId != "none":
-            lora_dir = get_output_dir() / req.loraModelId
+            lora_dir = assert_under(get_output_dir(), get_output_dir() / req.loraModelId)
             safetensors = list(lora_dir.glob("*.safetensors"))
             if safetensors:
                 lora_name = safetensors[0].stem.replace("_", " ").title()
@@ -692,11 +781,11 @@ async def generate_image(req: GenerateRequest):
         # Return a served URL (not a multi-MB base64 payload); the frontend adds origin + token.
         return {"url": f"/api/generated/{img_id}.png", "seed": actual_seed, "mock": False}
 
+    except HTTPException:
+        raise
     except Exception as e:
         print(f"[Inference] Error: {e}")
-        svg = _make_mock_svg(req.prompt, actual_seed, req.sampler, None, f"Inference error: {str(e)[:80]}")
-        # Real inference failure — flag it so the UI can distinguish from a no-GPU simulation
-        return {"url": svg, "seed": actual_seed, "mock": True, "error": True, "reason": str(e)}
+        raise HTTPException(status_code=500, detail=f"Inference failed: {e}")
 
 def _module_has_meta(module) -> bool:
     """Return True if a torch module contains meta tensors."""
@@ -724,7 +813,7 @@ def _repair_text_encoders_if_needed(pipe, architecture: str):
         if architecture == "sd21":
             repo_id = "stabilityai/stable-diffusion-2-1"
         else:
-            repo_id = "runwayml/stable-diffusion-v1-5"
+            repo_id = "stable-diffusion-v1-5/stable-diffusion-v1-5"
 
         print(f"[Inference] text_encoder is meta. Reloading text encoder from: {repo_id}")
 
@@ -1130,19 +1219,26 @@ async def training_websocket(websocket: WebSocket):
     try:
         while True:
             data = await websocket.receive_json()
+            # Fallback for older clients; HTTP /training/start now launches the loop.
             if data.get("type") == "start_training":
-                session_id = data["payload"]["sessionId"]
-                if session_id in active_training_sessions:
-                    session = active_training_sessions[session_id]
-                    task = asyncio.create_task(
-                        run_real_training(session_id, session, websocket)
-                    )
-                    active_training_sessions[session_id]["task"] = task
+                session_id = (data.get("payload") or {}).get("sessionId")
+                if session_id:
+                    _ensure_training_task(session_id)
     except WebSocketDisconnect:
         if websocket in active_connections:
             active_connections.remove(websocket)
 
-async def run_real_training(session_id: str, session: dict, websocket: WebSocket):
+def _ensure_training_task(session_id: str) -> None:
+    """Start the trainer task once per session. Safe to call from HTTP and WebSocket."""
+    session = active_training_sessions.get(session_id)
+    if not session:
+        return
+    task = session.get("task")
+    if task is not None and not task.done():
+        return
+    session["task"] = asyncio.create_task(run_real_training(session_id, session))
+
+async def run_real_training(session_id: str, session: dict, websocket=None):
     """Bridge between async WebSocket world and the blocking GPU trainer."""
     config_data = session["config"]
     model_path = session["model_path"]
@@ -1302,7 +1398,7 @@ async def list_base_models():
             m["status"] = "downloading"
         else:
             m["status"] = "not_downloaded"
-        result.append(m)
+        result.append(apply_arch_support(m))
     
     # Load custom models from settings
     if SETTINGS_FILE.exists():
@@ -1319,7 +1415,7 @@ async def list_base_models():
                 else:
                     cm["status"] = "not_downloaded"
                 cm["isCustom"] = True
-                result.append(cm)
+                result.append(apply_arch_support(cm))
         except Exception:
             pass
     
@@ -1337,8 +1433,7 @@ async def add_custom_model(req: CustomModelRequest):
     
     # Extract filename from URL
     filename = url.split("/")[-1].split("?")[0]
-    # Refuse pickle-based formats: torch.load's safety check is bypassed in this app,
-    # so a malicious .ckpt/.bin/.pt from an arbitrary URL could execute code on load.
+    # Only .safetensors — pickle checkpoints (.ckpt/.bin/.pt) can execute code on load.
     if filename.endswith((".ckpt", ".bin", ".pt")):
         raise HTTPException(
             status_code=400,
@@ -1464,6 +1559,13 @@ async def download_model(model_id: str):
     
     if not model_info:
         raise HTTPException(status_code=404, detail="Model not found")
+
+    model_info = apply_arch_support(dict(model_info))
+    if not model_info.get("supportedTraining") and not model_info.get("supportedInference"):
+        raise HTTPException(
+            status_code=400,
+            detail="This architecture is not supported yet. Training and Playground currently work with SD 1.5 and SDXL.",
+        )
     
     models_dir = get_models_dir()
     models_dir.mkdir(parents=True, exist_ok=True)
@@ -1745,9 +1847,8 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path,
                     })
                     
     except asyncio.CancelledError:
-        print(f"[Download] Cancelled: {filename}")
-        if part_path.exists():
-            part_path.unlink()
+        print(f"[Download] Cancelled: {filename} — keeping partial file for resume")
+        # Do not delete .part; the next download attempt resumes from it.
     except Exception as e:
         error_msg = str(e)
         print(f"[Download] FAILED: {filename} - {error_msg}")
@@ -1839,7 +1940,7 @@ async def list_trained_models():
 @app.delete("/api/gallery/models/{model_id}")
 async def delete_trained_model(model_id: str):
     """Delete a trained LoRA model and its directory."""
-    target = get_output_dir() / model_id
+    target = assert_under(get_output_dir(), get_output_dir() / model_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Model not found")
         
@@ -1854,7 +1955,7 @@ async def delete_trained_model(model_id: str):
 @app.post("/api/gallery/models/{model_id}/open")
 async def open_model_folder(model_id: str):
     """Open the model folder in the system file explorer."""
-    target = get_output_dir() / model_id
+    target = assert_under(get_output_dir(), get_output_dir() / model_id)
     if not target.exists():
         raise HTTPException(status_code=404, detail="Model folder not found")
     
@@ -1910,7 +2011,9 @@ async def list_generated_images():
 @app.delete("/api/gallery/images/{image_id}")
 async def delete_generated_image(image_id: str):
     """Delete a generated image and its metadata."""
-    img_file = GENERATED_DIR / f"{image_id}.png"
+    if "/" in image_id or "\\" in image_id or ".." in image_id:
+        raise HTTPException(status_code=400, detail="Invalid image id")
+    img_file = assert_under(GENERATED_DIR, GENERATED_DIR / f"{image_id}.png")
     meta_file = GENERATED_DIR / f"{image_id}.json"
     
     try:
@@ -1926,8 +2029,10 @@ async def delete_generated_image(image_id: str):
 async def get_generated_image(filename: str):
     """Serve a generated image file."""
     from fastapi.responses import FileResponse
-    file_path = GENERATED_DIR / filename
-    if not file_path.exists():
+    if "/" in filename or "\\" in filename or ".." in filename:
+        raise HTTPException(status_code=400, detail="Invalid filename")
+    file_path = assert_under(GENERATED_DIR, GENERATED_DIR / filename)
+    if file_path.suffix.lower() not in ALLOWED_IMAGE_EXT or not file_path.exists():
         raise HTTPException(status_code=404, detail="File not found")
     return FileResponse(str(file_path))
 

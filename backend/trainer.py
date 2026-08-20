@@ -18,41 +18,25 @@ os.environ["HF_HUB_DISABLE_SYMLINKS"] = "1"
 os.environ["PYTHONUNBUFFERED"] = "1"
 os.environ["ACCELERATE_USE_CPU_INIT"] = "0"
 
-# --- CRITICAL PATCHES FOR LIBRARIES ---
-def bypass_check():
-    return None
-
-# 1. Fixes: AttributeError: 'CLIPTextModel' object has no attribute 'text_model'
+# CLIPTextModel shim only — do not disable torch.load pickle checks.
 try:
     from transformers.models.clip.modeling_clip import CLIPTextModel
     if not hasattr(CLIPTextModel, "text_model"):
         CLIPTextModel.text_model = property(lambda self: self)
-except Exception: pass
+except Exception:
+    pass
 
-# 2. Fixes: ValueError: Due to a serious vulnerability issue in `torch.load`...
-# We patch it in every possible location within transformers
-try:
-    import transformers.utils.import_utils
-    transformers.utils.import_utils.check_torch_load_is_safe = bypass_check
-    
-    import transformers.modeling_utils
-    transformers.modeling_utils.check_torch_load_is_safe = bypass_check
-    
-    import transformers.dynamic_module_utils
-    transformers.dynamic_module_utils.check_torch_load_is_safe = bypass_check
-except Exception: pass
-
-# 3. Aggressively disable safety checker in diffusers
 try:
     import diffusers.loaders.single_file
     diffusers.loaders.single_file._legacy_load_safety_checker = lambda *args, **kwargs: {}
-except Exception: pass
+except Exception:
+    pass
 
-# 4. Force disable low_cpu_mem_usage globally in transformers
 try:
     import transformers.modeling_utils
     transformers.modeling_utils._CONFIG_FOR_LOW_CPU_MEM_USAGE = False
-except Exception: pass
+except Exception:
+    pass
 # ----------------------------------------
 import math
 import json
@@ -190,7 +174,6 @@ def get_optimization_profile(vram_gb: float, architecture: str) -> Dict[str, Any
         elif vram_gb >= 10:
             profile["gradient_checkpointing"] = False
             profile["max_batch_size"] = 2
-            profile["train_text_encoder"] = True
 
     # SDXL / Kolors (similar arch)
     elif architecture in ("sdxl", "kolors"):
@@ -260,10 +243,11 @@ def estimate_training_time(
     # Adjustments
     rank_factor = max(0.5, rank / 16.0)  # Higher rank = slightly more time
     res_factor = (resolution / native_res) ** 2  # Resolution scales quadratically
-    batch_factor = 1.0 / max(1, batch_size)  # More batch = fewer steps needed effectively
+    # Larger batch makes each step heavier, not cheaper.
+    batch_factor = max(1, batch_size) ** 0.85
 
-    time_per_step = base_time * rank_factor * res_factor
-    eta_seconds = steps * time_per_step * batch_factor
+    time_per_step = base_time * rank_factor * res_factor * batch_factor
+    eta_seconds = steps * time_per_step
 
     return {
         "eta_seconds": round(eta_seconds),
@@ -353,6 +337,35 @@ def get_bucket(w: int, h: int, resolution: int, step: int = 64):
     
     return target_w, target_h
 
+
+def peft_state_to_kohya(state_dict, lora_alpha: float, prefix: str = "lora_unet"):
+    """Convert PEFT LoRA keys to Kohya / A1111 / ComfyUI safetensors keys.
+
+    PEFT:  down_blocks.0.attentions.0....to_q.lora_A.weight
+    Kohya: lora_unet_down_blocks_0_attentions_0_..._to_q.lora_down.weight
+           + matching .lora_up.weight and .alpha
+    """
+    kohya = {}
+    for key, value in state_dict.items():
+        k = key
+        if k.startswith("base_model.model."):
+            k = k[len("base_model.model."):]
+        k = k.replace(".default.", ".")
+        if ".lora_A" in k:
+            module = k.split(".lora_A", 1)[0]
+            lora_type = "lora_down"
+        elif ".lora_B" in k:
+            module = k.split(".lora_B", 1)[0]
+            lora_type = "lora_up"
+        else:
+            continue
+        kohya_module = f"{prefix}_{module.replace('.', '_')}"
+        kohya[f"{kohya_module}.{lora_type}.weight"] = value.detach().contiguous().cpu()
+        alpha_key = f"{kohya_module}.alpha"
+        if alpha_key not in kohya:
+            kohya[alpha_key] = torch.tensor(float(lora_alpha))
+    return kohya
+
 class LoRADataset(torch.utils.data.Dataset):
     """Image+caption dataset with Aspect Ratio Bucketing support."""
     
@@ -410,19 +423,12 @@ class LoRADataset(torch.utils.data.Dataset):
         
         image = F.to_tensor(image)
         image = F.normalize(image, [0.5], [0.5])
-        
-        if torch.rand(1) < 0.5:
-            image = F.hflip(image)
-        
+
+        # Stochastic augmentations (hflip, caption dropout) are applied per training
+        # step on cached tensors — applying them here would bake one draw into the cache.
         txt_path = img_path.with_suffix(".txt")
-        caption = ""
-        
-        if txt_path.exists():
-            if self.caption_dropout > 0.0 and torch.rand(1).item() < self.caption_dropout:
-                caption = ""
-            else:
-                caption = txt_path.read_text(encoding="utf-8").strip()
-        
+        caption = txt_path.read_text(encoding="utf-8").strip() if txt_path.exists() else ""
+
         return {
             "pixel_values": image,
             "caption": caption,
@@ -513,10 +519,17 @@ class LoRATrainer:
             raise RuntimeError(opt_profile["warning"])
         
         # Determine dtype
-        if gpu_info["bf16_supported"] and config.get("mixedPrecision") == "bf16":
+        mixed = (config.get("mixedPrecision") or "fp16").lower()
+        use_amp = True
+        if mixed == "fp32":
+            weight_dtype = torch.float32
+            use_amp = False
+        elif mixed == "bf16" and gpu_info["bf16_supported"]:
             weight_dtype = torch.bfloat16
         else:
             weight_dtype = torch.float16
+            if mixed == "bf16" and not gpu_info["bf16_supported"]:
+                print("[Trainer] bf16 not supported on this GPU; falling back to fp16")
         
         device = torch.device("cuda")
         
@@ -681,10 +694,14 @@ class LoRATrainer:
         if len(dataset) == 0:
             raise RuntimeError("Dataset is empty! Please add images before training.")
         
-        # Pre-cache latents to save VRAM during training
+        # Pre-cache latents to save VRAM during training.
+        # Cache the *unaugmented* image + original caption; hflip / caption dropout
+        # are applied per step in the training loop so they actually vary.
         cached_latents = []
         cached_text_embeds = []
         cached_pooled_embeds = []
+        cached_uncond_embeds = None
+        cached_uncond_pooled = None
         
         if opt_profile["cache_latents"]:
             with torch.no_grad():
@@ -700,6 +717,11 @@ class LoRATrainer:
                     cached_text_embeds.append(embeds.cpu())
                     if pooled is not None:
                         cached_pooled_embeds.append(pooled.cpu())
+
+                if caption_dropout > 0:
+                    uncond_embeds, uncond_pooled = encode_prompt("")
+                    cached_uncond_embeds = uncond_embeds.cpu()
+                    cached_uncond_pooled = uncond_pooled.cpu() if uncond_pooled is not None else None
             
             # Free VRAM: offload VAE and text_encoders
             vae.cpu(); text_encoder_one.cpu()
@@ -758,21 +780,19 @@ class LoRATrainer:
         else:  # Default: AdamW
             optimizer = torch.optim.AdamW(lora_params, lr=learning_rate, weight_decay=1e-2)
         
-        total_steps = config.get("trainingSteps", 1000)
+        total_steps = config.get("trainingSteps", 1000)  # optimizer updates (matches UI)
         warmup_steps = config.get("warmupSteps", 0)
         scheduler_type = config.get("scheduler", "cosine")
+        grad_accum = max(1, int(config.get("gradientAccumulation", 1) or 1))
+        micro_steps = total_steps * grad_accum
         
         from torch.optim.lr_scheduler import LambdaLR
 
-        # The scheduler is stepped once per OPTIMIZER update (every grad_accum micro-steps),
-        # so the schedule must span the number of updates, not raw loop iterations — otherwise
-        # cosine decay only completes 1/grad_accum of the way through.
-        _grad_accum = max(1, config.get("gradientAccumulation", 1))
-        num_update_steps = max(1, math.ceil(total_steps / _grad_accum))
+        # Scheduler is stepped once per optimizer update. trainingSteps is that count.
+        num_update_steps = max(1, total_steps)
 
         def lr_lambda(current_step: int):
             # current_step counts optimizer updates (LambdaLR increments on each .step()).
-            # warmup_steps is interpreted in optimizer-update units.
             if current_step < warmup_steps:
                 return float(current_step) / float(max(1, warmup_steps))
             progress = float(current_step - warmup_steps) / float(max(1, num_update_steps - warmup_steps))
@@ -786,7 +806,6 @@ class LoRATrainer:
         seed = config.get("seed", 42)
         noise_offset = config.get("noiseOffset", 0.0)
         batch_size = min(config.get("batchSize", 1), opt_profile["max_batch_size"])
-        grad_accum = config.get("gradientAccumulation", 1)
         generator = torch.Generator(device=device).manual_seed(seed)
         # Seed the global RNGs too so batch draws and timestep sampling are reproducible.
         random.seed(seed)
@@ -827,18 +846,46 @@ class LoRATrainer:
             progress_callback(step=0, loss=0, lr=learning_rate, phase="training", message="Training started!")
 
         # --- Training Loop ---
-        for step in range(total_steps):
+        # trainingSteps = optimizer updates. Each update is `grad_accum` micro-batches.
+        for micro in range(micro_steps):
             if self._stop_requested: break
-            self._current_step = step
+            opt_step = micro // grad_accum
+            self._current_step = opt_step
             
             batch_indices = draw_batch()
-            
-            latents = torch.cat([cached_latents[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
-            encoder_hidden_states = torch.cat([cached_text_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
+
+            latents_list = []
+            embeds_list = []
+            pooled_list = []
+            for i in batch_indices:
+                lat = cached_latents[i]
+                # Spatial flip on latents approximates an image hflip without recaching.
+                if random.random() < 0.5:
+                    lat = torch.flip(lat, dims=[-1])
+                latents_list.append(lat)
+
+                drop = (
+                    caption_dropout > 0
+                    and cached_uncond_embeds is not None
+                    and random.random() < caption_dropout
+                )
+                if drop:
+                    embeds_list.append(cached_uncond_embeds)
+                    if cached_pooled_embeds:
+                        pooled_list.append(
+                            cached_uncond_pooled if cached_uncond_pooled is not None else cached_pooled_embeds[i]
+                        )
+                else:
+                    embeds_list.append(cached_text_embeds[i])
+                    if cached_pooled_embeds:
+                        pooled_list.append(cached_pooled_embeds[i])
+
+            latents = torch.cat(latents_list, dim=0).to(device, dtype=weight_dtype)
+            encoder_hidden_states = torch.cat(embeds_list, dim=0).to(device, dtype=weight_dtype)
             
             added_cond_kwargs = {}
-            if architecture == "sdxl" and cached_pooled_embeds:
-                pooled_embeds = torch.cat([cached_pooled_embeds[i] for i in batch_indices], dim=0).to(device, dtype=weight_dtype)
+            if architecture == "sdxl" and pooled_list:
+                pooled_embeds = torch.cat(pooled_list, dim=0).to(device, dtype=weight_dtype)
                 # SDXL time_ids: [orig_h, orig_w, crop_top, crop_left, target_h, target_w]
                 bucket_w, bucket_h = dataset.image_buckets[batch_indices[0]]
                 time_ids = torch.tensor(
@@ -858,7 +905,10 @@ class LoRATrainer:
             timesteps = torch.randint(0, noise_scheduler.config.num_train_timesteps, (latents.shape[0],), device=device).long()
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
             
-            with torch.amp.autocast("cuda", dtype=weight_dtype):
+            if use_amp:
+                with torch.amp.autocast("cuda", dtype=weight_dtype):
+                    noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs=added_cond_kwargs).sample
+            else:
                 noise_pred = unet(noisy_latents, timesteps, encoder_hidden_states, added_cond_kwargs=added_cond_kwargs).sample
             
             # Respect the scheduler's prediction type. SD2.x (and some SDXL variants) use
@@ -879,29 +929,30 @@ class LoRATrainer:
             if loss_value < best_loss:
                 best_loss = loss_value
             
-            if (step + 1) % grad_accum == 0:
+            if (micro + 1) % grad_accum == 0:
                 torch.nn.utils.clip_grad_norm_(lora_params, 1.0)
                 optimizer.step()
                 lr_scheduler.step()
                 optimizer.zero_grad()
 
-            # Report progress every 5 steps
-            if step % 5 == 0 or step == total_steps - 1:
+            completed = (micro + 1) // grad_accum
+            # Report on optimizer-step boundaries so the UI matches "Training Steps"
+            if (micro + 1) % grad_accum == 0 and (completed % 5 == 0 or completed == total_steps):
                 try:
                     current_lr = lr_scheduler.get_last_lr()[0]
                 except RuntimeError:
                     current_lr = learning_rate
                 avg_loss = running_loss / loss_count if loss_count > 0 else 0
                 elapsed = time.time() - start_time
-                eta = (elapsed / max(step + 1, 1)) * (total_steps - step - 1)
+                eta = (elapsed / max(completed, 1)) * (total_steps - completed)
                 
                 if progress_callback:
                     progress_callback(
-                        step=step,
+                        step=completed,
                         loss=loss_value,
                         lr=current_lr,
                         phase="training",
-                        message=f"Step {step}/{total_steps} | Loss: {loss_value:.4f} | Avg: {avg_loss:.4f}",
+                        message=f"Step {completed}/{total_steps} | Loss: {loss_value:.4f} | Avg: {avg_loss:.4f}",
                         avg_loss=avg_loss,
                         eta=eta,
                         elapsed=elapsed,
@@ -924,13 +975,18 @@ class LoRATrainer:
         lora_filename = f"{safe_name}.safetensors"
         lora_path = output_dir / lora_filename
         
-        # Save in standard format (single .safetensors file)
+        # Save in Kohya/A1111/ComfyUI format so the file loads outside this app.
         from peft.utils import get_peft_model_state_dict
         from safetensors.torch import save_file
         
-        state_dict = get_peft_model_state_dict(unet)
-        save_file(state_dict, str(lora_path))
-        print(f"[Trainer] LoRA saved: {lora_path}")
+        peft_state = get_peft_model_state_dict(unet)
+        kohya_state = peft_state_to_kohya(peft_state, lora_alpha=network_alpha)
+        if kohya_state:
+            save_file(kohya_state, str(lora_path))
+            print(f"[Trainer] LoRA saved (Kohya keys): {lora_path} ({len(kohya_state)} tensors)")
+        else:
+            save_file(peft_state, str(lora_path))
+            print(f"[Trainer] LoRA saved (PEFT keys, Kohya convert produced empty dict): {lora_path}")
         
         # Save adapter_config.json separately so Gallery can read rank/alpha metadata
         adapter_config = {
