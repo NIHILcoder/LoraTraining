@@ -1,260 +1,302 @@
+<div align="center">
+
 # LoRA Studio
 
-LoRA Studio is a Windows-first Electron desktop application for preparing datasets, managing base diffusion models, training LoRA adapters, and testing generated outputs from one local interface.
+**Local LoRA training for Stable Diffusion — from dataset to adapter, in one desktop app.**
 
-The project is currently in `1.0.0-beta.1`. Treat it as an active beta: the UI and packaging flow are usable, but training stability still depends heavily on the installed Python environment, GPU driver, CUDA-compatible PyTorch build, available VRAM, and the selected base model.
+Prepare images, download a base model, train a LoRA, and test it in the playground. Everything stays on your machine.
 
-## Current Scope
+[![version](https://img.shields.io/badge/version-1.0.0--beta.2-7c3aed?style=for-the-badge)](https://github.com/NIHILcoder/LoraTraining/releases)
+[![platform](https://img.shields.io/badge/platform-Windows_10%2F11-0078D6?style=for-the-badge&logo=windows&logoColor=white)](#requirements)
+[![license](https://img.shields.io/badge/license-MIT-22c55e?style=for-the-badge)](LICENSE)
+[![stack](https://img.shields.io/badge/Electron_+_FastAPI_+_CUDA-111827?style=for-the-badge)](#architecture)
 
-LoRA Studio provides:
+[Download](https://github.com/NIHILcoder/LoraTraining/releases/latest) · [Changelog](CHANGELOG.md) · [Roadmap](docs/ROADMAP.md)
 
-- Dataset staging with local image selection, thumbnail generation, and caption/tag editing.
-- Training configuration for SD 1.5, SD 2.1, SDXL, SD3, Flux, and Stable Cascade model families.
-- Local base model management, including downloads and custom model registration.
-- GPU and memory visibility with architecture-specific feasibility estimates.
-- Training progress, logs, and loss history through a local WebSocket bridge.
-- Playground generation using local base models and trained LoRA weights.
-- Gallery views for trained LoRA outputs and generated images.
-- Windows installer packaging through Electron Builder and NSIS.
+</div>
 
-The frontend still contains some mock dataset helpers while the training, model, gallery, output directory, GPU, and playground workflows talk to the local FastAPI backend.
+---
+
+## Why LoRA Studio
+
+Kohya, sd-scripts, and notebook workflows are powerful — and scattered across terminals, YAML, and Python environments. LoRA Studio wraps that loop into a Windows desktop app:
+
+| You need | LoRA Studio does |
+| --- | --- |
+| A Python + CUDA env | First-run setup via `uv` (Python 3.12, PyTorch CUDA 12.1) |
+| A base checkpoint | Catalog downloads with resume + SHA256 for SD 1.5 and SDXL |
+| Captioned images | Local import, bulk caption tools, optional BLIP auto-caption |
+| Training that matches the UI | `trainingSteps` = optimizer updates; dropout / flip applied per step |
+| A LoRA you can actually load | Saved in **Kohya / A1111 / ComfyUI** key format |
+| A sanity check | Built-in playground + gallery, PNG-info compatible with Civitai |
+
+This is an **active beta**. Training quality still depends on your GPU, driver, VRAM, dataset, and base model. SD 1.5 and SDXL are the supported training/inference pair; other families are listed in the catalog as coming soon.
+
+---
+
+## Features
+
+<table>
+<tr>
+<td width="50%" valign="top">
+
+### Dataset
+- Local PNG / JPEG / WEBP import
+- Thumbnails, tags, and per-image captions
+- Bulk prepend / append / find-replace
+- Batch auto-caption (BLIP)
+- Atomic image delete (no stale full-dataset rewrite)
+
+</td>
+<td width="50%" valign="top">
+
+### Training
+- SD 1.5 (512) and SDXL (1024)
+- Rank, alpha, LR, cosine / constant, warmup
+- Gradient accumulation, caption dropout, noise offset
+- Aspect-ratio bucketing and latent cache
+- Hardware panel: VRAM, feasibility, ETA
+- Live loss, logs, and cooperative stop
+
+</td>
+</tr>
+<tr>
+<td width="50%" valign="top">
+
+### Models
+- Catalog: SD 1.5, SD 2.1, SDXL
+- Resumable downloads (keeps `.part` on cancel)
+- SHA256 verification (SD 1.5, SDXL)
+- Import a local `.safetensors`
+- Custom URL registration (safetensors only)
+- Hugging Face token for gated repos
+
+</td>
+<td width="50%" valign="top">
+
+### Playground & gallery
+- txt2img with optional trained LoRA
+- Seed reuse, CFG, sampler, LoRA weight
+- Batch generation with unique seeds
+- A1111 / Civitai PNG metadata
+- Gallery for adapters and generated images
+- Open output folders in Explorer
+
+</td>
+</tr>
+</table>
+
+<details>
+<summary><strong>Architecture support</strong></summary>
+
+<br/>
+
+| Family | Train | Generate | Notes |
+| --- | :---: | :---: | --- |
+| **SD 1.5** | Yes | Yes | Recommended starting point · ~8 GB VRAM |
+| **SDXL 1.0** | Yes | Yes | 1024 native · 12 GB+ VRAM recommended |
+| **SD 2.1** | — | Yes | Training gated (OpenCLIP + v-prediction not finished) |
+| **SD 3 / Flux / Cascade** | — | — | Shown in the hub as coming soon; download disabled |
+
+</details>
+
+---
+
+## Screenshots
+
+The desktop shell is a dark training workspace: dataset on the left, config in the center, hardware + live run on the right. Models, Playground, and Gallery are separate pages in the sidebar.
+
+> Installer and in-app screenshots will land here once a tagged `1.0.0-beta.2` build is published.
+
+---
 
 ## Requirements
 
-### Runtime
+| | Minimum | Comfortable |
+| --- | --- | --- |
+| OS | Windows 10 / 11 (x64) | Windows 11 |
+| GPU | NVIDIA, CUDA-capable | RTX 3060 12 GB or better |
+| VRAM | 8 GB (SD 1.5, batch 1) | 12–16 GB (SDXL) |
+| RAM | 16 GB | 32 GB |
+| Disk | ~15 GB for env + one SD 1.5 | 40 GB+ if you keep SDXL too |
+| Network | Required for first setup and model downloads | |
 
-- Windows 10 or Windows 11.
-- NVIDIA GPU recommended.
-- 8 GB VRAM minimum for smaller SD 1.5 workflows.
-- 12 GB or more VRAM recommended for SDXL.
-- Flux workflows can require substantially more VRAM and disk space.
-- Stable internet connection for first-time Python dependency and model downloads.
+CPU-only machines can open the UI. Training and real inference need a CUDA GPU; without one the playground returns a mock placeholder instead of a silent fake success.
 
-### Development
+---
 
-- Node.js 18 or newer.
-- npm 9 or newer.
-- Python is installed by the app setup flow through `uv` when running the desktop app.
-- A recent NVIDIA driver if GPU training or inference is expected.
+## Install
 
-## Project Layout
+### Packaged app
 
-```text
-.
-|-- backend/                 # FastAPI backend, trainer, Python requirements
-|-- installer-assets/        # NSIS installer branding assets
-|-- public/                  # HTML template and application icons
-|-- src/
-|   |-- components/          # Reusable React UI components
-|   |-- context/             # App state provider
-|   |-- hooks/               # WebSocket and UI hooks
-|   |-- pages/               # Main application screens
-|   |-- services/            # Backend API client
-|   |-- App.tsx              # Application shell and router
-|   |-- backend_manager.ts   # Electron-side backend setup and process control
-|   `-- main.ts              # Electron main process
-|-- package.json             # npm scripts and Electron Builder config
-|-- webpack.config.js        # Renderer and Electron main builds
-`-- tsconfig.json
-```
+1. Grab the latest **NSIS installer** from [Releases](https://github.com/NIHILcoder/LoraTraining/releases).
+2. Run `LoRA Studio Setup <version>.exe`.
+3. On first launch, let the setup screen build the Python environment (this downloads `uv`, Python 3.12, CUDA PyTorch, and `backend/requirements.txt`).
+4. Download **SD 1.5** or **SDXL** from Models, then start a dataset.
 
-Generated folders such as `dist/`, `node_modules/`, `backend/env/`, model files, datasets, and training outputs are intentionally ignored by Git.
+The app is currently **unsigned**. Windows SmartScreen may warn on first install; “More info → Run anyway” is expected until code signing is added.
 
-## Installation
+Installed builds auto-update from GitHub Releases via `electron-updater`. Dev sessions do not.
 
-Install JavaScript dependencies:
+### From source
 
-```bash
+```powershell
+git clone https://github.com/NIHILcoder/LoraTraining.git
+cd LoraTraining
 npm install
-```
-
-Start the full Electron development flow:
-
-```bash
 npm run electron:dev
 ```
 
-This command:
+That builds the Electron main process, starts the renderer on `http://localhost:3005`, then launches the desktop window. The Python backend is spawned automatically after setup (preferred port `8000`, next free port if busy).
 
-1. Builds the Electron main process in development mode.
-2. Starts the Webpack dev server on `http://localhost:3005`.
-3. Launches Electron after the dev server is reachable.
+---
 
-On first desktop launch, the application checks `backend/env`. If the Python environment is missing, it opens the setup screen. The setup flow downloads `uv`, creates a Python 3.12 virtual environment, installs PyTorch with CUDA 12.1, then installs `backend/requirements.txt`.
+## Development
 
-## Development Commands
+| Command | What it does |
+| --- | --- |
+| `npm run electron:dev` | Full desktop loop (renderer + Electron + backend) |
+| `npm run dev` | Renderer only on port `3005` (no IPC / no trainer) |
+| `npm run type-check` | TypeScript, no emit |
+| `npm test` | Vitest |
+| `npm run build` | Production renderer + main + preload → `dist/` |
+| `npm run electron:dist` | NSIS installer → `dist/release/` |
+| `npm run electron:publish` | Build and publish to GitHub Releases |
 
-```bash
-npm run dev
-```
+Manual backend (debugging the env the app created):
 
-Starts only the renderer dev server on port `3005`. This is useful for frontend-only work, but it does not provide Electron IPC features.
-
-```bash
-npm run electron:build
-```
-
-Builds only the Electron main process into `dist/main.js`.
-
-```bash
-npm run electron:start
-```
-
-Starts Electron from the already built `dist/main.js`.
-
-```bash
-npm run type-check
-```
-
-Runs TypeScript validation without emitting files.
-
-```bash
-npm run build
-```
-
-Builds the production renderer and Electron main process into `dist/`.
-
-```bash
-npm run electron:dist
-```
-
-Builds the production app and creates a Windows NSIS installer in `dist/release/`.
-
-## Backend
-
-The backend is a FastAPI application served locally on port `8000`. Electron starts it automatically after the Python environment is ready.
-
-Main backend responsibilities:
-
-- Base model catalog and download management.
-- Custom model registration.
-- Training session orchestration.
-- GPU and VRAM inspection.
-- Output directory management.
-- Gallery metadata and file management.
-- Playground image generation.
-- WebSocket progress updates.
-
-Manual backend startup is only needed for debugging:
-
-```bash
+```powershell
 cd backend
-python -m uvicorn main:app --host 127.0.0.1 --port 8000
+& "$env:APPDATA\LoRA Studio\backend-env\Scripts\python.exe" -m uvicorn main:app --host 127.0.0.1 --port 8000
 ```
 
-Use the Python interpreter from `backend/env/Scripts/python.exe` when debugging the environment created by the app.
+Packaged builds store the env under Electron `userData` (`%APPDATA%\LoRA Studio`). Dev sessions may use a different folder — check the setup screen logs if the path above is empty.
 
-## Packaging
-
-The project uses Electron Builder with the NSIS target.
-
-Current packaging behavior:
-
-- Output directory: `dist/release/`
-- Installer target: NSIS
-- Installer mode: assisted wizard
-- Installation path selection: enabled
-- Desktop shortcut: enabled
-- Start menu shortcut: enabled
-- Custom installer and uninstaller sidebars: enabled
-- Custom installer header: enabled
-
-Build the installer:
-
-```bash
-npm run electron:dist
-```
-
-The generated installer is:
+### Layout
 
 ```text
-dist/release/LoRA Studio Setup 1.0.0-beta.1.exe
+.
+├── backend/                 FastAPI + trainer (diffusers, peft, accelerate)
+├── installer-assets/        NSIS header / sidebar bitmaps
+├── public/                  HTML shell
+├── src/
+│   ├── components/          Workspace, setup, shared UI
+│   ├── context/             App state
+│   ├── hooks/               WebSocket client
+│   ├── pages/               Models, Playground, Gallery, workspace
+│   ├── services/            REST client
+│   ├── backend_manager.ts   uv env + uvicorn process
+│   └── main.ts              Electron main
+├── CHANGELOG.md
+└── docs/ROADMAP.md
 ```
 
-Installer branding files live in `installer-assets/` and are referenced from the `build.nsis` section of `package.json`.
+Weights, datasets, `node_modules/`, and `dist/` are gitignored.
 
-## Ports
+---
 
-LoRA Studio uses fixed local ports during development and runtime:
+## Architecture
 
-- `3005` for the Webpack renderer dev server.
-- `8000` for the FastAPI backend.
+```mermaid
+flowchart TB
+  subgraph desktop [Electron desktop]
+    Main[Main process]
+    UI[React renderer]
+    Preload[Preload bridge]
+    UI --> Preload --> Main
+  end
 
-If port `8000` is already occupied, the Electron backend manager attempts to clean up the conflicting process on Windows before starting the backend.
+  subgraph local [127.0.0.1]
+    API[FastAPI + token gate]
+    WS[WebSocket progress]
+    Train[trainer.py · diffusers + peft]
+    API --> Train
+    API --- WS
+  end
+
+  Main -->|spawn uvicorn, dynamic port| API
+  UI -->|REST + WS| API
+  Train --> Disk[(models · datasets · LoRAs · generated)]
+```
+
+- The API binds to **localhost only** and requires a per-session token (`LORA_STUDIO_API_TOKEN`).
+- File endpoints resolve paths under known roots (`assert_under`) so `..` cannot escape the models / output / dataset dirs.
+- Custom checkpoints must be `.safetensors`. Pickle formats (`.ckpt`, `.bin`, `.pt`) are rejected.
+
+Do not expose the backend port. Do not load weights from untrusted URLs.
+
+---
+
+## Release
+
+Current version: **`1.0.0-beta.2`**.
+
+```powershell
+# 1. Bump "version" in package.json (must be strictly higher for auto-update)
+# 2. Publish installer + latest.yml
+$env:GH_TOKEN = "<repo-scoped token>"
+npm run electron:publish
+```
+
+`npm run electron:dist` builds locally without uploading.
+
+---
 
 ## Troubleshooting
 
-### The packaged app opens to a black screen
+<details>
+<summary><strong>Packaged app opens to a black screen</strong></summary>
 
-Make sure production assets are referenced with relative paths in `webpack.config.js`:
+<br/>
+
+Production assets must use a relative public path:
 
 ```js
 publicPath: isDev ? '/' : './'
 ```
 
-The packaged app loads `dist/index.html` through Electron `loadFile()`. Absolute asset paths such as `/renderer.js` resolve incorrectly under `file://`.
+The packaged app loads `dist/index.html` via `loadFile()`. Absolute paths like `/renderer.js` break under `file://`.
 
-### Routes do not work in the packaged app
+</details>
 
-The renderer must use `HashRouter` under `file://` and `BrowserRouter` in normal browser/dev-server mode.
+<details>
+<summary><strong>Routes 404 after packaging</strong></summary>
 
-### `electron-builder` fails with `spawn EPERM`
+<br/>
 
-This is usually caused by Windows permissions, antivirus, or sandbox restrictions blocking `node_modules/app-builder-bin/win/x64/app-builder.exe`. Run the packaging command from a normal trusted terminal, or allow the binary in the security tool that blocked it.
+The renderer uses `HashRouter` under `file://` and `BrowserRouter` on the webpack dev server.
 
-### npm prints `Test-Path : Access is denied`
+</details>
 
-Some Windows npm installations can print this warning from `C:\Program Files\nodejs\npm.ps1`. If the command exits with code `0`, the project command still completed successfully.
+<details>
+<summary><strong><code>electron-builder</code> fails with <code>spawn EPERM</code></strong></summary>
 
-### First setup is slow
+<br/>
 
-The setup flow downloads a Python environment, CUDA PyTorch wheels, AI dependencies, and large base models. This can take a long time and requires significant disk space.
+Windows permissions, antivirus, or a sandbox is blocking `node_modules/app-builder-bin/win/x64/app-builder.exe`. Run from a normal trusted terminal, or allow that binary.
 
-## Data and Model Storage
+</details>
 
-Large and generated artifacts must stay out of Git:
+<details>
+<summary><strong>First setup takes a long time</strong></summary>
 
-- `backend/env/`
-- `backend/models/`
-- `backend/output/`
-- `backend/training_data/`
-- `datasets/`
-- `models/`
-- `outputs/`
-- `*.safetensors`
-- `*.ckpt`
-- `*.pt`
-- `*.bin`
+<br/>
 
-These paths are ignored to avoid committing local environments, model weights, datasets, and generated outputs.
+Expected. The setup screen pulls a Python runtime, CUDA PyTorch wheels, and Hugging Face / Civitai checkpoints. Leave the window open; cancelled downloads keep a `.part` file and resume next time.
 
-## Security Notes
+</details>
 
-LoRA Studio is a local desktop tool. It starts a local HTTP API on `127.0.0.1:8000` and uses Electron IPC for setup, window controls, folder selection, and backend process management.
+<details>
+<summary><strong>Training or playground fails with CUDA / VRAM errors</strong></summary>
 
-Do not expose the backend port to a public network. Do not install or run model files from untrusted sources.
+<br/>
 
-## Release and Auto-Update
+Drop resolution, batch size, or rank. Prefer SD 1.5 on 8 GB cards. SDXL wants 12 GB+. Mixed precision `bf16` needs a recent NVIDIA GPU; use `fp16` or `fp32` otherwise.
 
-Current release: `1.0.0-beta.2`
+</details>
 
-The packaged app auto-updates from GitHub Releases via `electron-updater`. On launch it checks the latest release, downloads a newer installer in the background, and offers a **Restart & Install** action (updates run only in the installed app, not in dev).
-
-To cut a release — builds the NSIS installer, generates `latest.yml`, and uploads both to a GitHub Release:
-
-1. Bump `version` in `package.json` (auto-update only triggers for a strictly higher version).
-2. Set a GitHub token (with `repo` scope) and publish:
-
-   ```powershell
-   $env:GH_TOKEN="<token>"; npm run electron:publish
-   ```
-
-`npm run electron:dist` builds the installer locally without publishing (output in `dist/release/`).
-
-The app is currently unsigned, so Windows SmartScreen warns on first install/update; adding code signing removes the warning.
-
-See `CHANGELOG.md` for version history.
+---
 
 ## License
 
-This project is distributed under the license in `LICENSE`.
+[MIT](LICENSE) © 2026 Proxy Nihil
