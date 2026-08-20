@@ -4,7 +4,7 @@ import { Button } from '../ui/Button';
 import { Terminal, Download, Cpu, Activity, CheckCircle2, AlertTriangle, Zap } from 'lucide-react';
 import { ProgressBar } from '../ui/ProgressBar';
 
-export function SetupScreen({ onComplete }: { onComplete: () => void }) {
+export function SetupScreen({ onComplete }: { onComplete: () => void | Promise<void> }) {
   const [logs, setLogs] = useState<string[]>([]);
   const [progress, setProgress] = useState(0);
   const [currentStep, setCurrentStep] = useState('');
@@ -74,9 +74,9 @@ export function SetupScreen({ onComplete }: { onComplete: () => void }) {
     const api = window.loraStudio;
     if (!api) return;
 
-    const onBackendStarted = (result: any) => {
+    const onBackendStarted = async (result: any) => {
       if (result.success) {
-        onComplete();
+        await onComplete();
       } else {
         setStatus('error');
         setErrorMsg(result.error || 'Failed to start backend');

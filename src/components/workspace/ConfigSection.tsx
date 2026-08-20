@@ -273,7 +273,7 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
             />
             <ParamSlider label="Training Steps" value={config.trainingSteps}
               min={100} max={10000} step={100}
-              tooltip="Total optimizer steps"
+              tooltip="Optimizer updates. With gradient accumulation, each update is N micro-batches."
               onChange={(v) => updateConfig({ trainingSteps: v })}
             />
             <ParamSlider label="LoRA Rank" value={config.loraRank}
@@ -371,7 +371,7 @@ export function ConfigSection({ disabled = false }: ConfigSectionProps) {
                 />
                 <ParamSlider label="Gradient Accum." value={config.gradientAccumulation}
                   min={1} max={8} step={1}
-                  tooltip="Simulate larger batch sizes"
+                  tooltip="Micro-batches per optimizer update. Training Steps still counts updates."
                   onChange={(v) => updateConfig({ gradientAccumulation: v })}
                 />
                 <ParamSlider label="CLIP Skip" value={config.clipSkip}

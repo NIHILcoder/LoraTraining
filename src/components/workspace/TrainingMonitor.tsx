@@ -43,7 +43,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   const isStoppingRef = useRef(false);
   const [copied, setCopied] = useState(false);
 
-  const { isConnected, send } = useWebSocket({
+  const { isConnected } = useWebSocket({
     url: getWsUrl('/ws/training'),
     onMessage: (msg) => {
       // Use ref (not state) to avoid stale closure bug
@@ -113,11 +113,10 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
       }
       setSessionId(res.sessionId || null);
       sessionIdRef.current = res.sessionId || null;
-      if (isConnected && res.sessionId) {
-        send({ type: 'start_training', payload: { sessionId: res.sessionId } });
-      }
-    } catch (err) {
+      // Training is launched by the HTTP handler; WebSocket is only for progress.
+    } catch (err: any) {
       dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'error' } });
+      alert(err?.message || 'Failed to start training');
       console.error(err);
     }
   };

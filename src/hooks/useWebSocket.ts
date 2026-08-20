@@ -5,6 +5,7 @@ interface UseWebSocketOptions {
   url: string;
   onMessage?: (message: WSMessage) => void;
   reconnectInterval?: number;
+  /** Default: reconnect forever. Pass a finite number to cap attempts. */
   maxRetries?: number;
 }
 
@@ -19,7 +20,7 @@ export function useWebSocket({
   url,
   onMessage,
   reconnectInterval = 3000,
-  maxRetries = 10,
+  maxRetries = Number.POSITIVE_INFINITY,
 }: UseWebSocketOptions): UseWebSocketReturn {
   const [isConnected, setIsConnected] = useState(false);
   const [lastMessage, setLastMessage] = useState<WSMessage | null>(null);
@@ -27,27 +28,29 @@ export function useWebSocket({
   const retriesRef = useRef(0);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout>>();
   const isMountedRef = useRef(false);
+  const urlRef = useRef(url);
+  urlRef.current = url;
 
-  // Keep onMessage stable via ref so it doesn't re-trigger effects
   const onMessageRef = useRef(onMessage);
   useEffect(() => {
     onMessageRef.current = onMessage;
   }, [onMessage]);
 
   const connect = useCallback(() => {
-    // Don't open a new connection if one is already open or connecting
     const state = wsRef.current?.readyState;
     if (state === WebSocket.OPEN || state === WebSocket.CONNECTING) return;
     if (!isMountedRef.current) return;
+    const target = urlRef.current;
+    if (!target) return;
 
     try {
-      const ws = new WebSocket(url);
+      const ws = new WebSocket(target);
 
       ws.onopen = () => {
         if (!isMountedRef.current) { ws.close(); return; }
         setIsConnected(true);
         retriesRef.current = 0;
-        console.log('[WS] Connected to', url);
+        console.log('[WS] Connected to', target);
       };
 
       ws.onmessage = (event) => {
@@ -67,10 +70,14 @@ export function useWebSocket({
         console.log('[WS] Disconnected');
 
         if (retriesRef.current < maxRetries && isMountedRef.current) {
-          retriesRef.current += 1;
+          retriesRef.current = Math.min(retriesRef.current + 1, 20);
+          const delay = Math.min(
+            reconnectInterval * Math.pow(1.5, retriesRef.current - 1),
+            30000
+          );
           reconnectTimerRef.current = setTimeout(() => {
             if (isMountedRef.current) connect();
-          }, reconnectInterval);
+          }, delay);
         }
       };
 
@@ -82,7 +89,7 @@ export function useWebSocket({
     } catch (err) {
       console.error('[WS] Connection failed:', err);
     }
-  }, [url, reconnectInterval, maxRetries]); // stable deps only
+  }, [reconnectInterval, maxRetries]);
 
   const send = useCallback((data: unknown) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
@@ -95,12 +102,14 @@ export function useWebSocket({
   const reconnect = useCallback(() => {
     clearTimeout(reconnectTimerRef.current);
     wsRef.current?.close();
+    wsRef.current = null;
     retriesRef.current = 0;
     connect();
   }, [connect]);
 
   useEffect(() => {
     isMountedRef.current = true;
+    retriesRef.current = 0;
     connect();
     return () => {
       isMountedRef.current = false;
@@ -108,7 +117,7 @@ export function useWebSocket({
       wsRef.current?.close();
       wsRef.current = null;
     };
-  }, []); // only run on mount/unmount — connect is stable via useCallback
+  }, [url, connect]);
 
   return { isConnected, lastMessage, send, reconnect };
 }

@@ -1,4 +1,4 @@
-import React, { useState, useCallback } from 'react';
+import React, { useState, useCallback, useEffect, useRef } from 'react';
 import { useDropzone } from 'react-dropzone';
 import {
   Upload,
@@ -16,8 +16,8 @@ import { Badge } from '../ui/Badge';
 import { Modal } from '../ui/Modal';
 import { ProgressBar } from '../ui/ProgressBar';
 import { useApp } from '../../context/AppContext';
-import { uploadImage, createDataset, autoCaptionBatch, updateDataset, deleteImage } from '../../services/api';
-import type { DatasetImage } from '../../types';
+import { uploadImage, createDataset, autoCaptionBatch, deleteImage, fetchDatasets, updateImageCaptions, updateManyImageCaptions } from '../../services/api';
+import type { DatasetImage, Dataset } from '../../types';
 
 export function DatasetSection() {
   const { state, dispatch } = useApp();
@@ -37,6 +37,31 @@ export function DatasetSection() {
 
   const images = state.currentDataset?.images ?? [];
   const missingCaptions = images.filter(i => !i.captions || i.captions.length === 0).length;
+  const currentDatasetIdRef = useRef(state.currentDataset?.id);
+  currentDatasetIdRef.current = state.currentDataset?.id;
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const datasets = await fetchDatasets();
+        if (cancelled) return;
+        dispatch({ type: 'SET_DATASETS', payload: datasets });
+        const currentId = currentDatasetIdRef.current;
+        if (currentId) {
+          const match = datasets.find((d: Dataset) => d.id === currentId);
+          if (match) dispatch({ type: 'SET_CURRENT_DATASET', payload: match });
+          return;
+        }
+        if (datasets.length > 0) {
+          dispatch({ type: 'SET_CURRENT_DATASET', payload: datasets[0] });
+        }
+      } catch (err) {
+        console.error('Failed to restore datasets:', err);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [dispatch]);
 
   const handleAddTag = (e: React.KeyboardEvent<HTMLInputElement>) => {
     if (e.key === 'Enter' && tagInput.trim()) {
@@ -49,13 +74,8 @@ export function DatasetSection() {
             payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
           });
           setPreviewImage({ ...previewImage, captions: newTags });
-          
-          // Sync with backend
-          const updatedDs = {
-            ...state.currentDataset,
-            images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
-          };
-          updateDataset(updatedDs).catch(err => console.error('Failed to sync dataset:', err));
+          updateImageCaptions(state.currentDataset.id, previewImage.id, newTags)
+            .catch(err => console.error('Failed to sync captions:', err));
         }
         setTagInput('');
       }
@@ -70,13 +90,8 @@ export function DatasetSection() {
         payload: { datasetId: state.currentDataset.id, imageId: previewImage.id, captions: newTags }
       });
       setPreviewImage({ ...previewImage, captions: newTags });
-
-      // Sync with backend
-      const updatedDs = {
-        ...state.currentDataset,
-        images: state.currentDataset.images.map(img => img.id === previewImage.id ? { ...img, captions: newTags } : img)
-      };
-      updateDataset(updatedDs).catch(err => console.error('Failed to sync dataset:', err));
+      updateImageCaptions(state.currentDataset.id, previewImage.id, newTags)
+        .catch(err => console.error('Failed to sync captions:', err));
     }
   };
 
@@ -95,17 +110,17 @@ export function DatasetSection() {
       const results = await autoCaptionBatch(
         toCaption.map(img => ({ imageId: img.id, imageUrl: img.filePath || img.url }))
       );
-      let workingImages = ds.images.map(i => ({ ...i }));
+      const updates: { imageId: string; captions: string[] }[] = [];
       for (const r of results) {
         if (r.tags && r.tags.length) {
           dispatch({
             type: 'UPDATE_DATASET_IMAGE_CAPTIONS',
             payload: { datasetId: ds.id, imageId: r.imageId, captions: r.tags }
           });
-          workingImages = workingImages.map(i => i.id === r.imageId ? { ...i, captions: r.tags! } : i);
+          updates.push({ imageId: r.imageId, captions: r.tags });
         }
       }
-      await updateDataset({ ...ds, images: workingImages });
+      await updateManyImageCaptions(ds.id, updates);
     } catch (err) {
       console.error('Batch captioning failed:', err);
     } finally {
@@ -124,7 +139,10 @@ export function DatasetSection() {
       dispatch({ type: 'UPDATE_DATASET_IMAGE_CAPTIONS', payload: { datasetId: ds.id, imageId: img.id, captions: img.captions || [] } })
     );
     try {
-      await updateDataset({ ...ds, images: nextImages });
+      await updateManyImageCaptions(
+        ds.id,
+        nextImages.map(img => ({ imageId: img.id, captions: img.captions || [] }))
+      );
     } catch (err) {
       console.error('Failed to persist caption changes:', err);
     }
@@ -158,12 +176,12 @@ export function DatasetSection() {
   const ensureDataset = useCallback(async () => {
     if (!state.currentDataset) {
       const ds = await createDataset('Default Dataset');
-      dispatch({ type: 'SET_DATASETS', payload: [ds] });
+      dispatch({ type: 'SET_DATASETS', payload: [...state.datasets, ds] });
       dispatch({ type: 'SET_CURRENT_DATASET', payload: ds });
       return ds;
     }
     return state.currentDataset;
-  }, [state.currentDataset, dispatch]);
+  }, [state.currentDataset, state.datasets, dispatch]);
 
   const onDrop = useCallback(
     async (acceptedFiles: File[]) => {
@@ -237,6 +255,34 @@ export function DatasetSection() {
               <span className="ws-section__toggle-count">{images.length} images</span>
             )}
           </span>
+          {state.datasets.length > 1 && (
+            <select
+              value={state.currentDataset?.id || ''}
+              onClick={(e) => e.stopPropagation()}
+              onChange={(e) => {
+                e.stopPropagation();
+                const ds = state.datasets.find(d => d.id === e.target.value);
+                if (ds) dispatch({ type: 'SET_CURRENT_DATASET', payload: ds });
+              }}
+              style={{
+                marginLeft: 'auto',
+                marginRight: 8,
+                maxWidth: 160,
+                padding: '2px 6px',
+                fontSize: 11,
+                background: 'var(--color-bg-elevated)',
+                color: 'var(--color-text-primary)',
+                border: '1px solid var(--color-surface-border)',
+                borderRadius: 4,
+              }}
+            >
+              {state.datasets.map(d => (
+                <option key={d.id} value={d.id}>
+                  {d.name} ({d.images?.length || 0})
+                </option>
+              ))}
+            </select>
+          )}
           <span className={`ws-section__toggle-chevron ${isOpen ? 'ws-section__toggle-chevron--open' : ''}`}>
             <ChevronDown size={14} />
           </span>

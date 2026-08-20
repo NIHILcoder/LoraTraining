@@ -9,7 +9,7 @@ import { useApp } from '../../context/AppContext';
 import { Button } from '../ui/Button';
 import { fetchGpuInfo, estimateTrainingTime } from '../../services/api';
 
-// Architecture display names
+const TRAINABLE_ARCHS = new Set(['sd15', 'sdxl']);
 const ARCH_LABELS: Record<string, string> = {
   sd15: 'SD 1.5', sd21: 'SD 2.1', sdxl: 'SDXL', sd3: 'SD3',
   flux: 'Flux', cascade: 'Cascade',
@@ -136,8 +136,10 @@ export function HardwarePanel() {
 
   if (!gpu) return null;
 
-  const feasibleCount = Object.values(profiles).filter(p => p.feasible).length;
-  const totalArchs = Object.keys(profiles).length;
+  const feasibleCount = Object.entries(profiles).filter(
+    ([arch, p]) => TRAINABLE_ARCHS.has(arch) && p.feasible
+  ).length;
+  const totalArchs = Object.keys(profiles).filter((a) => TRAINABLE_ARCHS.has(a)).length;
 
   return (
     <Card className="hw-panel" padding="none">
@@ -225,15 +227,20 @@ export function HardwarePanel() {
               {Object.entries(profiles).map(([arch, profile]) => {
                 const est = estimates[arch];
                 const isSelected = arch === config.baseModel;
+                const selectable = TRAINABLE_ARCHS.has(arch);
                 return (
                   <div
                     key={arch}
-                    className={`hw-compat-item ${isSelected ? 'hw-compat-item--selected' : ''}`}
-                    onClick={() => dispatch({ type: 'UPDATE_CONFIG', payload: { baseModel: arch as any } })}
-                    style={{ cursor: 'pointer' }}
+                    className={`hw-compat-item ${isSelected ? 'hw-compat-item--selected' : ''} ${selectable ? '' : 'hw-compat-item--disabled'}`}
+                    onClick={() => {
+                      if (!selectable) return;
+                      dispatch({ type: 'UPDATE_CONFIG', payload: { baseModel: arch as any } });
+                    }}
+                    style={{ cursor: selectable ? 'pointer' : 'default' }}
+                    title={selectable ? undefined : 'Training for this architecture is not available yet'}
                   >
                     <div className="hw-compat-item__top">
-                      {profile.feasible ? (
+                      {selectable && profile.feasible ? (
                         <CheckCircle2 size={13} className="hw-compat-icon--ok" />
                       ) : (
                         <XCircle size={13} className="hw-compat-icon--no" />
@@ -241,10 +248,12 @@ export function HardwarePanel() {
                       <span className="hw-compat-item__name">{ARCH_LABELS[arch] || arch}</span>
                     </div>
                     <div className="hw-compat-item__bottom">
-                      {profile.feasible && est?.feasible ? (
+                      {selectable && profile.feasible && est?.feasible ? (
                         <span className="hw-compat-item__eta">~{formatTime(est.eta_seconds)}</span>
-                      ) : (
+                      ) : selectable ? (
                         <span className="hw-compat-item__req">{profile.min_vram}GB+</span>
+                      ) : (
+                        <span className="hw-compat-item__req">Soon</span>
                       )}
                     </div>
                   </div>

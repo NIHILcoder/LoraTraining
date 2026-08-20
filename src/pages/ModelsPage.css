@@ -77,6 +77,10 @@
   overflow: hidden;
 }
 
+.model-card--soon {
+  opacity: 0.88;
+}
+
 .model-card:hover {
   border-color: var(--color-surface-border-hover);
   box-shadow: var(--shadow-md);

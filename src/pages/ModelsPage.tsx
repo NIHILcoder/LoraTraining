@@ -138,6 +138,11 @@ export function ModelsPage() {
   }, [loadModels]);
 
   const handleDownload = async (modelId: string) => {
+    const target = state.baseModels.find(m => m.id === modelId);
+    if (target && target.supportedTraining === false && target.supportedInference === false) {
+      return;
+    }
+
     // Check if it's a model that likely needs a token (all high-end models on HF)
     const gatedModels = ['flux-dev', 'flux-schnell', 'sd3-medium'];
     const isGated = gatedModels.includes(modelId);
@@ -270,10 +275,17 @@ export function ModelsPage() {
     .filter(m => m.status === 'downloaded')
     .reduce((acc, m) => acc + (m.fileSize || 0), 0);
 
-  const renderModelCard = (model: BaseModel) => (
+  const archLabel = (architecture: string) =>
+    ({ sd15: 'SD 1.5', sd21: 'SD 2.1', sdxl: 'SDXL', sd3: 'SD3', flux: 'FLUX', cascade: 'Cascade' } as Record<string, string>)[architecture]
+    || architecture.toUpperCase();
+
+  const renderModelCard = (model: BaseModel) => {
+    const usable = model.supportedTraining !== false || model.supportedInference !== false;
+    const comingSoon = !usable;
+    return (
     <div
       key={model.id}
-      className={`model-card ${model.status === 'downloaded' ? 'model-card--downloaded' : ''} ${model.status === 'downloading' ? 'model-card--downloading' : ''}`}
+      className={`model-card ${model.status === 'downloaded' ? 'model-card--downloaded' : ''} ${model.status === 'downloading' ? 'model-card--downloading' : ''} ${comingSoon ? 'model-card--soon' : ''}`}
     >
       {model.isCustom && <div className="model-card__custom-tag">Custom</div>}
 
@@ -281,10 +293,12 @@ export function ModelsPage() {
         <div className="model-card__title-group">
           <span className="model-card__name">{model.name}</span>
           <span className={`model-card__arch-badge model-card__arch-badge--${model.architecture}`}>
-            {model.architecture === 'sd15' && 'SD 1.5'}
-            {model.architecture === 'sdxl' && 'SDXL'}
-            {model.architecture === 'flux' && 'FLUX'}
+            {archLabel(model.architecture)}
           </span>
+          {comingSoon && <Badge variant="default" size="sm">Coming soon</Badge>}
+          {model.supportedTraining === false && model.supportedInference && (
+            <Badge variant="default" size="sm">Playground only</Badge>
+          )}
         </div>
         <div className={`model-card__status-icon model-card__status-icon--${model.status}`}>
           {model.status === 'downloaded' && <CheckCircle2 size={18} />}
@@ -295,6 +309,16 @@ export function ModelsPage() {
       </div>
 
       <p className="model-card__description">{model.description}</p>
+      {comingSoon && (
+        <p className="model-card__description" style={{ color: 'var(--color-text-tertiary)', marginTop: 0 }}>
+          Training and Playground currently support SD 1.5 and SDXL only. Download is disabled to avoid a multi-GB file you cannot use yet.
+        </p>
+      )}
+      {model.supportedTraining === false && model.supportedInference && (
+        <p className="model-card__description" style={{ color: 'var(--color-text-tertiary)', marginTop: 0 }}>
+          Can be used in Playground. LoRA training for this architecture is not available yet.
+        </p>
+      )}
 
       <div className="model-card__meta">
         <span className="model-card__meta-item">
@@ -325,7 +349,7 @@ export function ModelsPage() {
       )}
 
       <div className="model-card__actions">
-        {model.status === 'not_downloaded' && (
+        {model.status === 'not_downloaded' && !comingSoon && (
           <Button
             variant="primary"
             size="sm"
@@ -335,7 +359,7 @@ export function ModelsPage() {
             Download
           </Button>
         )}
-        {model.status === 'error' && (
+        {model.status === 'error' && !comingSoon && (
           <Button
             variant="primary"
             size="sm"
@@ -381,7 +405,8 @@ export function ModelsPage() {
         )}
       </div>
     </div>
-  );
+    );
+  };
 
   if (loading) {
     return (
@@ -575,7 +600,6 @@ export function ModelsPage() {
               >
                 <option value="sd15">SD 1.5</option>
                 <option value="sdxl">SDXL</option>
-                <option value="flux">FLUX</option>
               </select>
             </div>
           </div>

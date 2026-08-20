@@ -175,6 +175,32 @@ export async function deleteImage(
   if (!response.ok) throw new Error('Failed to delete image');
 }
 
+export async function updateImageCaptions(
+  datasetId: string,
+  imageId: string,
+  captions: string[]
+): Promise<void> {
+  const response = await apiFetch(`${getApiBase()}/datasets/${datasetId}/images/${imageId}/captions`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ captions }),
+  });
+  if (!response.ok) throw new Error('Failed to update captions');
+}
+
+export async function updateManyImageCaptions(
+  datasetId: string,
+  updates: { imageId: string; captions: string[] }[]
+): Promise<void> {
+  if (updates.length === 0) return;
+  const response = await apiFetch(`${getApiBase()}/datasets/${datasetId}/captions`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ updates }),
+  });
+  if (!response.ok) throw new Error('Failed to update captions');
+}
+
 export async function autoCaptionImage(imageId: string, imageUrl: string): Promise<string[]> {
   const response = await apiFetch(`${getApiBase()}/dataset/caption`, {
     method: 'POST',
@@ -232,7 +258,9 @@ export async function fetchAvailableBaseModels(): Promise<{ id: string; name: st
   const res = await apiFetch(`${getApiBase()}/models/base`);
   if (!res.ok) return [];
   const data = await res.json();
-  return (data.models || []).filter((m: any) => m.status === 'downloaded');
+  return (data.models || []).filter(
+    (m: any) => m.status === 'downloaded' && m.supportedInference !== false
+  );
 }
 
 export async function fetchModels(): Promise<any[]> {

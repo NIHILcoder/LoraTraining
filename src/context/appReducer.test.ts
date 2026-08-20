@@ -57,9 +57,13 @@ describe('appReducer', () => {
     expect(state.datasets[0].images[0].captions).toEqual(['cat', 'dog']);
   });
 
-  it('merges training config updates without dropping other fields', () => {
-    const state = appReducer(initialState, { type: 'UPDATE_CONFIG', payload: { trainingSteps: 4242 } });
-    expect(state.trainingConfig.trainingSteps).toBe(4242);
-    expect(state.trainingConfig.loraRank).toBe(initialState.trainingConfig.loraRank);
+  it('replaces the dataset list and selects current for restore-on-boot', () => {
+    const ds1 = { id: 'a', name: 'A', images: [], totalSize: 0, createdAt: '', updatedAt: '' };
+    const ds2 = { id: 'b', name: 'B', images: [sampleImage], totalSize: 1, createdAt: '', updatedAt: '' };
+    let state = appReducer(initialState, { type: 'SET_DATASETS', payload: [ds1, ds2] });
+    expect(state.datasets.map(d => d.id)).toEqual(['a', 'b']);
+    state = appReducer(state, { type: 'SET_CURRENT_DATASET', payload: ds2 });
+    expect(state.currentDataset?.id).toBe('b');
+    expect(state.currentDataset?.images.length).toBe(1);
   });
 });

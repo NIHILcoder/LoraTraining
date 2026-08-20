@@ -77,7 +77,12 @@ export function App() {
     return (
       <div className="window-layout">
         <TitleBar />
-        <SetupScreen onComplete={() => setAppState('ready')} />
+          <SetupScreen
+            onComplete={async () => {
+              await initApiPort();
+              setAppState('ready');
+            }}
+          />
       </div>
     );
   }

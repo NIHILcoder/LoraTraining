@@ -224,9 +224,9 @@ export function startBackend(onLog: (msg: string) => void, port: number = 8000, 
     };
 
     backendProcess = spawn(
-      `"${PYTHON_EXE}"`,
+      PYTHON_EXE,
       ['-m', 'uvicorn', 'main:app', '--host', '127.0.0.1', '--port', String(port)],
-      { cwd: BACKEND_DIR, env: envVars, shell: true }
+      { cwd: BACKEND_DIR, env: envVars, shell: false }
     );
 
     let isStarted = false;
@@ -260,7 +260,16 @@ export function startBackend(onLog: (msg: string) => void, port: number = 8000, 
 
 export function stopBackend() {
   if (backendProcess) {
-    backendProcess.kill('SIGTERM');
+    const pid = backendProcess.pid;
+    if (process.platform === 'win32' && pid) {
+      try {
+        execSync(`taskkill /PID ${pid} /T /F`, { stdio: 'ignore' });
+      } catch {
+        backendProcess.kill();
+      }
+    } else {
+      backendProcess.kill('SIGTERM');
+    }
     backendProcess = null;
   }
   if (currentInstallerProcess) {

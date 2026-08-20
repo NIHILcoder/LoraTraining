@@ -23,6 +23,10 @@ export interface BaseModel {
   localPath?: string;
   error?: string;
   isCustom?: boolean;
+  /** False until the trainer implements this architecture. */
+  supportedTraining?: boolean;
+  /** False until playground inference implements this architecture. */
+  supportedInference?: boolean;
 }
 
 // --- Dataset Types ---
