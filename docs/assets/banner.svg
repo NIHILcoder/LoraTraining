@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1600 560" role="img" aria-label="LoRA Studio">
+  <title>LoRA Studio</title>
+  <defs>
+    <pattern id="grid" width="40" height="40" patternUnits="userSpaceOnUse">
+      <path d="M 40 0 L 0 0 0 40" fill="none" stroke="#161616" stroke-width="1"/>
+    </pattern>
+    <linearGradient id="fade" x1="0" y1="0" x2="0" y2="1">
+      <stop offset="0" stop-color="#000" stop-opacity="0.15"/>
+      <stop offset="0.45" stop-color="#000" stop-opacity="0.55"/>
+      <stop offset="1" stop-color="#000" stop-opacity="1"/>
+    </linearGradient>
+  </defs>
+
+  <rect width="1600" height="560" fill="#000"/>
+  <rect width="1600" height="560" fill="url(#grid)"/>
+  <rect width="1600" height="560" fill="url(#fade)"/>
+
+  <!-- frame -->
+  <rect x="24" y="24" width="1552" height="512" fill="none" stroke="#1A1A1A" stroke-width="1"/>
+  <rect x="40" y="40" width="1520" height="480" fill="none" stroke="#111" stroke-width="1"/>
+
+  <!-- rank mark: B × A -->
+  <g transform="translate(80, 86)" fill="none" stroke="#FAFAFA" stroke-width="1.5">
+    <rect x="0" y="0" width="18" height="72"/>
+    <rect x="28" y="20" width="72" height="18"/>
+    <text x="0" y="96" fill="#52525B" stroke="none" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" letter-spacing="0.28em">LOW-RANK</text>
+  </g>
+
+  <text x="80" y="248" fill="#FAFAFA" font-family="ui-sans-serif, system-ui, Segoe UI, Helvetica, Arial, sans-serif" font-size="72" font-weight="500" letter-spacing="0.18em">LORA STUDIO</text>
+  <text x="80" y="292" fill="#A1A1AA" font-family="ui-sans-serif, system-ui, Segoe UI, Helvetica, Arial, sans-serif" font-size="18" letter-spacing="0.06em">Desktop environment for training and evaluating LoRA adapters</text>
+
+  <line x1="80" y1="332" x2="720" y2="332" stroke="#27272A" stroke-width="1"/>
+
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="12" fill="#71717A" letter-spacing="0.22em">
+    <text x="80" y="372">01  DATASET</text>
+    <text x="260" y="372">02  BASE MODEL</text>
+    <text x="480" y="372">03  TRAIN</text>
+    <text x="640" y="372">04  EVALUATE</text>
+    <text x="840" y="372">05  EXPORT</text>
+  </g>
+
+  <g font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" fill="#A1A1AA" letter-spacing="0.16em">
+    <text x="80" y="468">1.0.0-BETA.2</text>
+    <text x="260" y="468">WINDOWS 10 / 11</text>
+    <text x="480" y="468">CUDA 12.1</text>
+    <text x="640" y="468">SD 1.5 · SDXL</text>
+    <text x="840" y="468">KOHYA / A1111 / COMFYUI</text>
+  </g>
+
+  <rect x="1368" y="72" width="148" height="28" fill="none" stroke="#3F3F46" stroke-width="1"/>
+  <text x="1442" y="91" text-anchor="middle" fill="#FAFAFA" font-family="ui-monospace, SFMono-Regular, Consolas, monospace" font-size="11" letter-spacing="0.32em">LOCAL ONLY</text>
+</svg>
