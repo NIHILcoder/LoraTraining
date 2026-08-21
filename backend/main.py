@@ -105,6 +105,15 @@ GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
+from storage_util import (
+    allocate_nonclobber_dest,
+    atomic_write_json,
+    should_unlink_model_file,
+    unique_filename,
+)
+
+_datasets_lock = asyncio.Lock()
+
 def assert_under(root: Path, candidate: Path) -> Path:
     """Resolve candidate and require it to sit under root (blocks path traversal)."""
     root_r = root.resolve()
@@ -132,7 +141,7 @@ def save_settings(data: dict):
         except Exception:
             pass
     existing.update(data)
-    SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+    atomic_write_json(SETTINGS_FILE, existing)
 
 def save_secrets(data: dict):
     existing = {}
@@ -142,7 +151,7 @@ def save_secrets(data: dict):
         except Exception:
             pass
     existing.update(data)
-    SECRETS_FILE.write_text(json.dumps(existing, indent=2))
+    atomic_write_json(SECRETS_FILE, existing)
 
 
 # Architectures this build can actually train / generate with.
@@ -311,7 +320,40 @@ def load_datasets():
     return {}
 
 def save_datasets(data):
-    DATASETS_FILE.write_text(json.dumps(data, indent=2))
+    atomic_write_json(DATASETS_FILE, data)
+
+def _iter_registered_models():
+    """Yield catalog + custom model dicts currently registered on disk."""
+    for m in MODEL_CATALOG:
+        yield m
+    if SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text())
+            for cm in settings.get("customModels", []):
+                yield cm
+        except Exception:
+            pass
+
+def _filenames_held_by_other_models(except_id: str) -> set:
+    return {m["filename"] for m in _iter_registered_models() if m.get("id") != except_id and m.get("filename")}
+
+def _model_already_registered_for_file(models_dir: Path, src: Path):
+    """Return an existing catalog/custom entry that already points at this file, else None."""
+    try:
+        src_r = src.resolve()
+    except OSError:
+        return None
+    for m in _iter_registered_models():
+        filename = m.get("filename")
+        if not filename:
+            continue
+        candidate = models_dir / filename
+        try:
+            if candidate.exists() and candidate.resolve() == src_r:
+                return m
+        except OSError:
+            continue
+    return None
 
 @dataset_router.get("")
 async def get_datasets():
@@ -332,20 +374,22 @@ async def create_dataset(req: CreateDatasetReq):
         "createdAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
         "updatedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
     }
-    datasets = load_datasets()
-    datasets[ds_id] = ds
-    save_datasets(datasets)
+    async with _datasets_lock:
+        datasets = load_datasets()
+        datasets[ds_id] = ds
+        save_datasets(datasets)
     return ds
 
 @dataset_router.delete("/{ds_id}")
 async def delete_dataset(ds_id: str):
-    datasets = load_datasets()
-    if ds_id in datasets:
-        del datasets[ds_id]
-        save_datasets(datasets)
-        ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id)
-        if ds_dir.exists():
-            shutil.rmtree(ds_dir, ignore_errors=True)
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id in datasets:
+            del datasets[ds_id]
+            save_datasets(datasets)
+            ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id)
+            if ds_dir.exists():
+                shutil.rmtree(ds_dir, ignore_errors=True)
     return {"status": "ok"}
 
 class UpdateDatasetReq(PydanticBase):
@@ -353,12 +397,13 @@ class UpdateDatasetReq(PydanticBase):
 
 @dataset_router.put("/{ds_id}")
 async def update_dataset(ds_id: str, req: UpdateDatasetReq):
-    datasets = load_datasets()
-    if ds_id in datasets:
-        datasets[ds_id] = req.dataset
-        datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        save_datasets(datasets)
-        return datasets[ds_id]
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id in datasets:
+            datasets[ds_id] = req.dataset
+            datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            save_datasets(datasets)
+            return datasets[ds_id]
     raise HTTPException(status_code=404, detail="Dataset not found")
 
 class UploadLocalImageReq(PydanticBase):
@@ -368,59 +413,60 @@ class UploadLocalImageReq(PydanticBase):
 
 @dataset_router.post("/{ds_id}/images/local")
 async def upload_local_image(ds_id: str, req: UploadLocalImageReq):
-    datasets = load_datasets()
-    if ds_id not in datasets:
-        raise HTTPException(status_code=404, detail="Dataset not found")
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id not in datasets:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+            
+        ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id) / "images"
+        ds_dir.mkdir(parents=True, exist_ok=True)
+
+        src = Path(req.filePath)
+        try:
+            src = src.resolve()
+        except Exception:
+            raise HTTPException(status_code=400, detail="Invalid file path")
+        if not src.is_file():
+            raise HTTPException(status_code=400, detail="File not found")
+        ext = src.suffix.lower()
+        if ext not in ALLOWED_IMAGE_EXT:
+            raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WEBP images can be added.")
+
+        img_id = str(uuid.uuid4())[:8]
+        dest_path = ds_dir / f"{img_id}{ext}"
         
-    ds_dir = assert_under(TRAINING_DATA_DIR, TRAINING_DATA_DIR / ds_id) / "images"
-    ds_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            shutil.copy2(str(src), dest_path)
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=f"Failed to copy file: {e}")
+            
+        # Read real image dimensions (previously hardcoded to 1024x1024, corrupting bucket metadata)
+        img_width, img_height = 0, 0
+        try:
+            from PIL import Image as _PILImage
+            with _PILImage.open(dest_path) as _im:
+                img_width, img_height = _im.size
+        except Exception:
+            pass
 
-    src = Path(req.filePath)
-    try:
-        src = src.resolve()
-    except Exception:
-        raise HTTPException(status_code=400, detail="Invalid file path")
-    if not src.is_file():
-        raise HTTPException(status_code=400, detail="File not found")
-    ext = src.suffix.lower()
-    if ext not in ALLOWED_IMAGE_EXT:
-        raise HTTPException(status_code=400, detail="Only PNG, JPEG, and WEBP images can be added.")
-
-    img_id = str(uuid.uuid4())[:8]
-    dest_path = ds_dir / f"{img_id}{ext}"
-    
-    try:
-        shutil.copy2(str(src), dest_path)
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=f"Failed to copy file: {e}")
+        img_metadata = {
+            "id": img_id,
+            "filename": req.filename,
+            "url": f"/api/datasets/{ds_id}/images/{img_id}/raw",
+            "filePath": str(dest_path.resolve()),
+            "size": req.size,
+            "width": img_width,
+            "height": img_height,
+            "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+            "captions": []
+        }
         
-    # Read real image dimensions (previously hardcoded to 1024x1024, corrupting bucket metadata)
-    img_width, img_height = 0, 0
-    try:
-        from PIL import Image as _PILImage
-        with _PILImage.open(dest_path) as _im:
-            img_width, img_height = _im.size
-    except Exception:
-        pass
-
-    img_metadata = {
-        "id": img_id,
-        "filename": req.filename,
-        "url": f"/api/datasets/{ds_id}/images/{img_id}/raw",
-        "filePath": str(dest_path.resolve()),
-        "size": req.size,
-        "width": img_width,
-        "height": img_height,
-        "uploadedAt": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
-        "captions": []
-    }
-    
-    datasets[ds_id]["images"].append(img_metadata)
-    datasets[ds_id]["totalSize"] += req.size
-    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_datasets(datasets)
-    
-    return img_metadata
+        datasets[ds_id]["images"].append(img_metadata)
+        datasets[ds_id]["totalSize"] += req.size
+        datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_datasets(datasets)
+        
+        return img_metadata
 
 @dataset_router.get("/{ds_id}/images/{img_id}/raw")
 async def get_image_raw(ds_id: str, img_id: str):
@@ -439,16 +485,17 @@ class PatchImageCaptionsReq(PydanticBase):
 @dataset_router.patch("/{ds_id}/images/{img_id}/captions")
 async def patch_image_captions(ds_id: str, img_id: str, req: PatchImageCaptionsReq):
     """Update captions for a single image without rewriting the rest of the dataset."""
-    datasets = load_datasets()
-    if ds_id not in datasets:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    target = next((i for i in datasets[ds_id].get("images", []) if i.get("id") == img_id), None)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Image not found")
-    target["captions"] = req.captions
-    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_datasets(datasets)
-    return target
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id not in datasets:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        target = next((i for i in datasets[ds_id].get("images", []) if i.get("id") == img_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+        target["captions"] = req.captions
+        datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_datasets(datasets)
+        return target
 
 class CaptionUpdateItem(PydanticBase):
     imageId: str
@@ -460,45 +507,47 @@ class PatchManyCaptionsReq(PydanticBase):
 @dataset_router.patch("/{ds_id}/captions")
 async def patch_many_captions(ds_id: str, req: PatchManyCaptionsReq):
     """Update captions for many images without replacing the rest of the dataset."""
-    datasets = load_datasets()
-    if ds_id not in datasets:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    by_id = {i.get("id"): i for i in datasets[ds_id].get("images", [])}
-    for u in req.updates:
-        if u.imageId not in by_id:
-            raise HTTPException(status_code=404, detail=f"Image not found: {u.imageId}")
-    for u in req.updates:
-        by_id[u.imageId]["captions"] = u.captions
-    datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_datasets(datasets)
-    return {"status": "ok", "updated": len(req.updates)}
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id not in datasets:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        by_id = {i.get("id"): i for i in datasets[ds_id].get("images", [])}
+        for u in req.updates:
+            if u.imageId not in by_id:
+                raise HTTPException(status_code=404, detail=f"Image not found: {u.imageId}")
+        for u in req.updates:
+            by_id[u.imageId]["captions"] = u.captions
+        datasets[ds_id]["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_datasets(datasets)
+        return {"status": "ok", "updated": len(req.updates)}
 
 @dataset_router.delete("/{ds_id}/images/{img_id}")
 async def delete_dataset_image(ds_id: str, img_id: str):
     """Delete a single image from a dataset (atomic on the server; no full-dataset rewrite race)."""
-    datasets = load_datasets()
-    if ds_id not in datasets:
-        raise HTTPException(status_code=404, detail="Dataset not found")
-    ds = datasets[ds_id]
-    imgs = ds.get("images", [])
-    target = next((i for i in imgs if i.get("id") == img_id), None)
-    if target is None:
-        raise HTTPException(status_code=404, detail="Image not found")
-    try:
-        fp = target.get("filePath")
-        if fp:
-            safe = assert_under(TRAINING_DATA_DIR, Path(fp))
-            if safe.is_file():
-                safe.unlink()
-    except HTTPException:
-        pass
-    except Exception:
-        pass
-    ds["images"] = [i for i in imgs if i.get("id") != img_id]
-    ds["totalSize"] = max(0, ds.get("totalSize", 0) - int(target.get("size", 0) or 0))
-    ds["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-    save_datasets(datasets)
-    return {"status": "ok"}
+    async with _datasets_lock:
+        datasets = load_datasets()
+        if ds_id not in datasets:
+            raise HTTPException(status_code=404, detail="Dataset not found")
+        ds = datasets[ds_id]
+        imgs = ds.get("images", [])
+        target = next((i for i in imgs if i.get("id") == img_id), None)
+        if target is None:
+            raise HTTPException(status_code=404, detail="Image not found")
+        try:
+            fp = target.get("filePath")
+            if fp:
+                safe = assert_under(TRAINING_DATA_DIR, Path(fp))
+                if safe.is_file():
+                    safe.unlink()
+        except HTTPException:
+            pass
+        except Exception:
+            pass
+        ds["images"] = [i for i in imgs if i.get("id") != img_id]
+        ds["totalSize"] = max(0, ds.get("totalSize", 0) - int(target.get("size", 0) or 0))
+        ds["updatedAt"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        save_datasets(datasets)
+        return {"status": "ok"}
 
 app.include_router(dataset_router)
 
@@ -1441,6 +1490,12 @@ async def add_custom_model(req: CustomModelRequest):
         )
     if not filename.endswith(".safetensors"):
         filename += ".safetensors"
+
+    taken = {m.get("filename") for m in _iter_registered_models() if m.get("filename")}
+    try:
+        filename = unique_filename(filename, taken)
+    except FileExistsError:
+        raise HTTPException(status_code=500, detail="Could not allocate a unique model filename.")
     
     model_id = f"custom-{uuid.uuid4().hex[:8]}"
     name = req.name or filename.replace(".safetensors", "").replace(".", " ").replace("_", " ").replace("-", " ").title()
@@ -1468,7 +1523,7 @@ async def add_custom_model(req: CustomModelRequest):
     custom_models = existing.get("customModels", [])
     custom_models.append(custom_model)
     existing["customModels"] = custom_models
-    SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+    atomic_write_json(SETTINGS_FILE, existing)
 
     return custom_model
 
@@ -1488,12 +1543,23 @@ async def import_local_model(req: ImportLocalModelReq):
 
     models_dir = get_models_dir()
     models_dir.mkdir(parents=True, exist_ok=True)
-    dest = models_dir / src.name
+
+    existing = _model_already_registered_for_file(models_dir, src)
+    if existing:
+        raise HTTPException(
+            status_code=409,
+            detail=f"This file is already registered as '{existing.get('name', existing.get('filename'))}'. Importing it again would share the weight file and risk deleting it later.",
+        )
+
+    try:
+        dest = allocate_nonclobber_dest(models_dir, src)
+    except FileExistsError:
+        raise HTTPException(status_code=500, detail="Could not allocate a unique model filename.")
 
     # Disk-space precheck (unless the file is already in place)
     try:
         size = src.stat().st_size
-        if not dest.exists() and shutil.disk_usage(str(models_dir)).free < size * 1.05:
+        if src.resolve() != dest.resolve() and shutil.disk_usage(str(models_dir)).free < size * 1.05:
             raise HTTPException(status_code=507, detail="Not enough disk space to import this model.")
     except HTTPException:
         raise
@@ -1531,7 +1597,7 @@ async def import_local_model(req: ImportLocalModelReq):
     custom_models = existing.get("customModels", [])
     custom_models.append(custom_model)
     existing["customModels"] = custom_models
-    SETTINGS_FILE.write_text(json.dumps(existing, indent=2))
+    atomic_write_json(SETTINGS_FILE, existing)
 
     return custom_model
 
@@ -1609,12 +1675,13 @@ async def cancel_download(model_id: str):
 @app.delete("/api/models/base/{model_id}")
 async def delete_model_file(model_id: str):
     models_dir = get_models_dir()
-    
+    others = _filenames_held_by_other_models(model_id)
+
     # Check catalog
     for m in MODEL_CATALOG:
         if m["id"] == model_id:
             filepath = models_dir / m["filename"]
-            if filepath.exists():
+            if filepath.exists() and should_unlink_model_file(m["filename"], others):
                 filepath.unlink()
             return {"status": "deleted"}
     
@@ -1626,13 +1693,15 @@ async def delete_model_file(model_id: str):
             for cm in custom_models:
                 if cm["id"] == model_id:
                     filepath = models_dir / cm["filename"]
-                    if filepath.exists():
+                    if filepath.exists() and should_unlink_model_file(cm["filename"], others):
                         filepath.unlink()
                     # Also remove from settings
                     custom_models = [x for x in custom_models if x["id"] != model_id]
                     settings["customModels"] = custom_models
-                    SETTINGS_FILE.write_text(json.dumps(settings, indent=2))
+                    atomic_write_json(SETTINGS_FILE, settings)
                     return {"status": "deleted"}
+        except HTTPException:
+            raise
         except Exception:
             pass
     
