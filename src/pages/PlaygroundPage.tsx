@@ -18,6 +18,8 @@ import { useLocation } from 'react-router-dom';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { generateImage, fetchModels, fetchAvailableBaseModels } from '../services/api';
+import { useApp } from '../context/AppContext';
+import { TRAINING_BUSY_PHASES } from '../types';
 import './PlaygroundPage.css';
 
 interface GenHistory {
@@ -56,6 +58,8 @@ interface BaseModelOption {
 
 export function PlaygroundPage() {
   const location = useLocation();
+  const { state } = useApp();
+  const trainingBusy = TRAINING_BUSY_PHASES.includes(state.trainingStatus.phase);
 
   // Generation params
   const [prompt, setPrompt] = useState('masterpiece, highly detailed, cyberpunk neon street, reflection in puddle');
@@ -126,6 +130,10 @@ export function PlaygroundPage() {
   }, [location.state]);
 
   const handleGenerate = async () => {
+    if (trainingBusy) {
+      setGenError('Cannot generate while training is running. Stop training first.');
+      return;
+    }
     setIsGenerating(true);
     setGenError(null);
     try {
@@ -406,7 +414,7 @@ export function PlaygroundPage() {
           size="lg"
           icon={isGenerating ? <Loader2 size={18} className="animate-spin" /> : <Play size={18} />}
           onClick={handleGenerate}
-          disabled={isGenerating || !prompt}
+          disabled={isGenerating || !prompt || trainingBusy}
           style={{ flexShrink: 0, marginTop: '8px' }}
         >
           {isGenerating ? 'Generating...' : (batchCount > 1 ? `Generate ${batchCount}` : 'Generate')}

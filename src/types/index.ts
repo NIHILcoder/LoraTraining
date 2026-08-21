@@ -90,7 +90,10 @@ export interface ConfigPreset {
 }
 
 // --- Training Status ---
-export type TrainingPhase = 'idle' | 'preparing' | 'training' | 'completed' | 'error';
+export type TrainingPhase = 'idle' | 'preparing' | 'loading_model' | 'training' | 'saving' | 'completed' | 'error';
+
+/** Phases during which the GPU trainer is occupied (Start must stay disabled). */
+export const TRAINING_BUSY_PHASES: TrainingPhase[] = ['preparing', 'loading_model', 'training', 'saving'];
 
 export interface TrainingStep {
   step: number;

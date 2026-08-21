@@ -71,6 +71,7 @@ async def verify_api_token(request: Request, call_next):
 active_training_sessions = {}
 active_connections: list[WebSocket] = []
 active_downloads: dict[str, asyncio.Task] = {}
+_inference_lock = asyncio.Lock()
 
 def _log_dep_versions():
     """Log tested dependency versions at startup so mismatches are visible (P1-02)."""
@@ -538,13 +539,34 @@ async def estimate_time(req: EstimateRequest):
 
 @app.post("/api/training/start")
 async def start_training(req: TrainingStartRequest):
-    if trainer_instance.is_training:
+    # Reserve before dataset copy / model lookup. is_training used to flip only
+    # inside the GPU thread, so a second Start (double-click, or the button
+    # reappearing during phase=loading_model) could launch two train() loops.
+    if not trainer_instance.try_acquire():
         raise HTTPException(status_code=400, detail="Training is already in progress")
-    
+    if _inference_lock.locked():
+        trainer_instance.release()
+        raise HTTPException(
+            status_code=409,
+            detail="Cannot start training while the playground is generating an image.",
+        )
+
     config = req.config
     images = req.images
     session_id = str(uuid.uuid4())
-    
+    launched = False
+
+    try:
+        await _start_training_reserved(config, images, session_id)
+        launched = True
+        return {"sessionId": session_id}
+    finally:
+        if not launched:
+            trainer_instance.release()
+            active_training_sessions.pop(session_id, None)
+
+
+async def _start_training_reserved(config, images, session_id: str):
     # Find the base model file
     models_dir = get_models_dir()
     model_path = None
@@ -601,8 +623,6 @@ async def start_training(req: TrainingStartRequest):
     }
     # Launch from HTTP so training does not depend on a live WebSocket message.
     _ensure_training_task(session_id)
-    
-    return {"sessionId": session_id}
 
 @app.post("/api/training/stop/{session_id}")
 async def stop_training(session_id: str):
@@ -645,7 +665,6 @@ async def get_training_output(session_id: str):
 
 # Lazy-loaded inference pipeline cache: (model_path, lora_path) -> pipeline
 _inference_cache: dict = {}
-_inference_lock = asyncio.Lock()
 
 class GenerateRequest(PydanticBase):
     prompt: str
@@ -714,8 +733,15 @@ async def generate_image(req: GenerateRequest):
     # --- Real inference ---
     try:
         # Serialize GPU work: the pipeline cache is shared and cleared on model switch,
-        # so concurrent generations must not race on it.
+        # so concurrent generations must not race on it. Also refuse if training
+        # already reserved the GPU — a second UNet load OOMs and aborts the run
+        # with no checkpoint saved.
         async with _inference_lock:
+            if trainer_instance.is_training:
+                raise HTTPException(
+                    status_code=409,
+                    detail="Cannot generate images while training is running. Stop training first.",
+                )
             pipe = await asyncio.to_thread(
                 _load_pipeline, model_path, lora_path, req.loraWeight, target_arch
             )
@@ -1302,6 +1328,7 @@ async def run_real_training(session_id: str, session: dict, websocket=None):
         
         asyncio.run_coroutine_threadsafe(_send(), loop)
     
+    train_started = False
     try:
         # Log start
         await broadcast_to_connections({
@@ -1319,6 +1346,7 @@ async def run_real_training(session_id: str, session: dict, websocket=None):
         })
         
         # Run the actual training in a thread pool (blocking GPU work)
+        train_started = True
         result = await asyncio.to_thread(
             trainer_instance.train,
             config=config_data,
@@ -1365,6 +1393,10 @@ async def run_real_training(session_id: str, session: dict, websocket=None):
             }
         })
     finally:
+        # If we never reached trainer.train(), the HTTP reservation would leak
+        # and every later Start would 400. train() releases when it does run.
+        if not train_started:
+            trainer_instance.release()
         active_training_sessions.pop(session_id, None)
 
 # ============================================

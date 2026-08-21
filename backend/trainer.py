@@ -43,6 +43,8 @@ import json
 
 import torch
 
+from training_reservation import TrainingReservation
+
 # ============================================
 # GPU & System Detection + Optimization Profiles
 # ============================================
@@ -446,19 +448,33 @@ class LoRATrainer:
     Supports SD 1.5 and SDXL with automatic VRAM optimization.
     """
     
-    def __init__(self):
+    def __init__(self, reservation: Optional[TrainingReservation] = None):
         self._stop_requested = False
         self._is_training = False
+        self._impl_running = False
         self._current_step = 0
         self._lock = threading.Lock()
+        self._reservation = reservation if reservation is not None else TrainingReservation()
     
+    def try_acquire(self) -> bool:
+        """Reserve the trainer before slow HTTP setup so a second start cannot sneak in."""
+        if not self._reservation.try_acquire():
+            return False
+        self._is_training = True
+        self._stop_requested = False
+        return True
+
+    def release(self) -> None:
+        self._is_training = False
+        self._reservation.release()
+
     def request_stop(self):
         """Signal the training loop to stop after the current step."""
         self._stop_requested = True
     
     @property
     def is_training(self) -> bool:
-        return self._is_training
+        return self._reservation.held or self._is_training
     
     def train(
         self,
@@ -483,14 +499,29 @@ class LoRATrainer:
         Returns:
             Dict with training results (output_path, final_loss, total_steps)
         """
-        self._stop_requested = False
+        with self._lock:
+            if self._impl_running:
+                raise RuntimeError("Training is already in progress")
+            self._impl_running = True
+
+        # HTTP /training/start should already have reserved the slot. Direct
+        # callers (tests) still need to acquire so is_training is accurate.
+        if not self._reservation.held:
+            if not self.try_acquire():
+                with self._lock:
+                    self._impl_running = False
+                raise RuntimeError("Training is already in progress")
+
         self._is_training = True
         self._current_step = 0
+        # Do not clear _stop_requested: Stop during HTTP dataset prep must still abort the loop.
         
         try:
             return self._train_impl(config, dataset_dir, model_path, output_dir, progress_callback)
         finally:
-            self._is_training = False
+            with self._lock:
+                self._impl_running = False
+            self.release()
             # Clean up GPU memory
             gc.collect()
             if torch.cuda.is_available():

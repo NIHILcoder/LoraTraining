@@ -22,6 +22,7 @@ import { useApp } from '../../context/AppContext';
 import { useWebSocket } from '../../hooks/useWebSocket';
 import { startTraining, stopTraining, getWsUrl } from '../../services/api';
 import { HardwarePanel } from './HardwarePanel';
+import { TRAINING_BUSY_PHASES } from '../../types';
 
 interface TrainingMonitorProps {
   onTrainingStateChange?: (isTraining: boolean) => void;
@@ -42,6 +43,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   const sessionIdRef = useRef<string | null>(null);
   const isStoppingRef = useRef(false);
   const [copied, setCopied] = useState(false);
+  const startInFlightRef = useRef(false);
 
   const { isConnected } = useWebSocket({
     url: getWsUrl('/ws/training'),
@@ -89,7 +91,7 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
     dispatch({ type: 'SET_WS_CONNECTED', payload: isConnected });
   }, [isConnected, dispatch]);
 
-  const isTraining = status.phase === 'training' || status.phase === 'preparing';
+  const isTraining = TRAINING_BUSY_PHASES.includes(status.phase);
   const isActive = isTraining || status.phase === 'completed' || status.phase === 'error';
 
   // Notify parent of training state
@@ -98,10 +100,12 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
   }, [isTraining, onTrainingStateChange]);
 
   const handleStart = async () => {
+    if (startInFlightRef.current || isTraining) return;
     if (!dataset) { alert('Please upload a dataset first.'); return; }
     if (dataset.images.length === 0) { alert('Dataset is empty.'); return; }
     const imagesWithPaths = dataset.images.filter(img => img.filePath);
     if (imagesWithPaths.length === 0) { alert('No images with local file paths.'); return; }
+    startInFlightRef.current = true;
     try {
       dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'preparing', totalSteps: config.trainingSteps, lossHistory: [], logs: [] } });
       const imageData = imagesWithPaths.map(img => ({ filePath: img.filePath, captions: img.captions || [] }));
@@ -118,6 +122,8 @@ export function TrainingMonitor({ onTrainingStateChange }: TrainingMonitorProps)
       dispatch({ type: 'SET_TRAINING_STATUS', payload: { phase: 'error' } });
       alert(err?.message || 'Failed to start training');
       console.error(err);
+    } finally {
+      startInFlightRef.current = false;
     }
   };
 

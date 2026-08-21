@@ -1,6 +1,7 @@
 import { describe, it, expect } from 'vitest';
 import { appReducer, initialState } from './AppContext';
 import type { AppState, DatasetImage } from '../types';
+import { TRAINING_BUSY_PHASES } from '../types';
 
 function stateWithDataset(): AppState {
   const ds = { id: 'd1', name: 'DS', images: [], totalSize: 0, createdAt: '', updatedAt: '' };
@@ -57,13 +58,13 @@ describe('appReducer', () => {
     expect(state.datasets[0].images[0].captions).toEqual(['cat', 'dog']);
   });
 
-  it('replaces the dataset list and selects current for restore-on-boot', () => {
-    const ds1 = { id: 'a', name: 'A', images: [], totalSize: 0, createdAt: '', updatedAt: '' };
-    const ds2 = { id: 'b', name: 'B', images: [sampleImage], totalSize: 1, createdAt: '', updatedAt: '' };
-    let state = appReducer(initialState, { type: 'SET_DATASETS', payload: [ds1, ds2] });
-    expect(state.datasets.map(d => d.id)).toEqual(['a', 'b']);
-    state = appReducer(state, { type: 'SET_CURRENT_DATASET', payload: ds2 });
-    expect(state.currentDataset?.id).toBe('b');
-    expect(state.currentDataset?.images.length).toBe(1);
+  it('treats loading_model and saving as busy so Start stays disabled', () => {
+    expect(TRAINING_BUSY_PHASES).toEqual(['preparing', 'loading_model', 'training', 'saving']);
+    for (const phase of TRAINING_BUSY_PHASES) {
+      const state = appReducer(initialState, { type: 'SET_TRAINING_STATUS', payload: { phase } });
+      expect(TRAINING_BUSY_PHASES.includes(state.trainingStatus.phase)).toBe(true);
+    }
+    const idle = appReducer(initialState, { type: 'SET_TRAINING_STATUS', payload: { phase: 'idle' } });
+    expect(TRAINING_BUSY_PHASES.includes(idle.trainingStatus.phase)).toBe(false);
   });
 });

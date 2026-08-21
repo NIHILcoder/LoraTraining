@@ -41,6 +41,7 @@
         "filter": [
           "main.py",
           "trainer.py",
+          "training_reservation.py",
           "requirements.txt"
         ]
       }
