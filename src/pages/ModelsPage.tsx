@@ -49,6 +49,7 @@ export function ModelsPage() {
   const [savingDir, setSavingDir] = useState(false);
   
   const [hfToken, setHfToken] = useState('');
+  const [hasHfToken, setHasHfToken] = useState(false);
   const [showTokenEdit, setShowTokenEdit] = useState(false);
   const [savingToken, setSavingToken] = useState(false);
   const [highlightToken, setHighlightToken] = useState(false);
@@ -130,9 +131,9 @@ export function ModelsPage() {
     // Fetch HF Token on mount
     getHfToken()
       .then(d => {
-        if (d.hasToken) {
-          setHfToken(d.token);
-        }
+        // The API returns a masked token. Never put it in the editable field —
+        // saving it would overwrite the real secret with asterisks.
+        setHasHfToken(Boolean(d.hasToken));
       })
       .catch(console.error);
   }, [loadModels]);
@@ -147,7 +148,7 @@ export function ModelsPage() {
     const gatedModels = ['flux-dev', 'flux-schnell', 'sd3-medium'];
     const isGated = gatedModels.includes(modelId);
     
-    if (isGated && !hfToken) {
+    if (isGated && !hasHfToken) {
       window.scrollTo({ top: 0, behavior: 'smooth' });
       setShowTokenEdit(true);
       setHighlightToken(true);
@@ -211,8 +212,9 @@ export function ModelsPage() {
     try {
       const result = await importLocalModel(filePath);
       dispatch({ type: 'ADD_BASE_MODEL', payload: result as BaseModel });
-    } catch (err) {
+    } catch (err: any) {
       console.error('Import failed:', err);
+      alert(err?.message || 'Failed to import model');
     }
   };
 
@@ -250,9 +252,16 @@ export function ModelsPage() {
   };
 
   const handleSaveToken = async () => {
+    const value = hfToken.trim();
+    if (!value || value.includes('*')) {
+      alert('Paste a full HuggingFace token. The masked value shown after save cannot be written back.');
+      return;
+    }
     setSavingToken(true);
     try {
-      await setHfToken(hfToken);
+      await setHfToken(value);
+      setHasHfToken(true);
+      setHfToken('');
       setShowTokenEdit(false);
     } catch (err) {
       console.error('Failed to save token:', err);
@@ -521,7 +530,7 @@ export function ModelsPage() {
               ) : (
                 <>
                   <span className="models-storage-path" style={{ opacity: 0.7 }}>
-                    {hfToken ? '•'.repeat(Math.min(hfToken.length, 12)) : 'Not set (Required for Flux & SD3)'}
+                    {hasHfToken ? '•'.repeat(12) : 'Not set (Required for Flux & SD3)'}
                   </span>
                   <Button variant="ghost" size="sm" onClick={() => setShowTokenEdit(true)}>
                     Edit
@@ -529,7 +538,7 @@ export function ModelsPage() {
                 </>
               )}
             </div>
-            {showTokenEdit && !hfToken && (
+            {showTokenEdit && !hasHfToken && (
               <div style={{ fontSize: 'var(--font-xs)', color: 'var(--text-muted)', marginTop: 'var(--space-2)', display: 'flex', flexDirection: 'column', gap: 'var(--space-1)' }}>
                 <span style={{ color: 'var(--text-warning)' }}>⚠️ Token is required to download this model.</span>
                 <span><strong>Step 1:</strong> Go to <a href="#" onClick={(e) => { e.preventDefault(); window.loraStudio?.openExternal('https://huggingface.co/settings/tokens') }} style={{ color: 'var(--primary)', textDecoration: 'underline', cursor: 'pointer' }}>HuggingFace Tokens page</a>.</span>
