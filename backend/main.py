@@ -278,7 +278,18 @@ class TrainingStartRequest(PydanticBase):
 
 # Global trainer instance
 from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset, estimate_training_time, ARCH_VRAM_MIN
+from model_resolve import resolve_base_model
 trainer_instance = LoRATrainer()
+
+def load_custom_models() -> list:
+    """Custom checkpoints registered in settings.json (local import / URL add)."""
+    if SETTINGS_FILE.exists():
+        try:
+            settings = json.loads(SETTINGS_FILE.read_text())
+            return list(settings.get("customModels") or [])
+        except Exception:
+            pass
+    return []
 
 def get_output_dir() -> Path:
     """Return the user-configured output directory, or the default."""
@@ -671,28 +682,23 @@ async def generate_image(req: GenerateRequest):
 
     actual_seed = req.seed if req.seed >= 0 else random.randint(0, 2**31 - 1)
 
-    # --- Resolve base model path ---
+    # --- Resolve base model path (catalog + imported custom checkpoints) ---
     models_dir = get_models_dir()
-    model_path = None
-
-    # If caller specified a baseModelId, find that model
-    target_arch = req.baseModelId or "sd15"
-    for m in MODEL_CATALOG:
-        if m["architecture"] == target_arch or m["id"] == target_arch:
-            candidate = models_dir / m["filename"]
-            if candidate.exists():
-                model_path = str(candidate)
-                target_arch = m["architecture"]
-                break
-
-    # Also check any downloaded model
-    if not model_path:
-        for m in MODEL_CATALOG:
-            candidate = models_dir / m["filename"]
-            if candidate.exists():
-                model_path = str(candidate)
-                target_arch = m["architecture"]
-                break
+    resolved_path, resolved_arch, resolved_name = resolve_base_model(
+        req.baseModelId,
+        models_dir,
+        MODEL_CATALOG,
+        load_custom_models(),
+    )
+    model_path = str(resolved_path) if resolved_path else None
+    target_arch = resolved_arch or req.baseModelId or "sd15"
+    requested_id = (req.baseModelId or "").strip()
+    specific_request = bool(requested_id) and requested_id.lower() not in ("auto", "none")
+    if specific_request and not model_path:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Base model '{requested_id}' is not available on disk. Re-import or download it.",
+        )
 
     # --- Resolve LoRA path ---
     lora_path = None
@@ -736,12 +742,7 @@ async def generate_image(req: GenerateRequest):
             if safetensors:
                 lora_name = safetensors[0].stem.replace("_", " ").title()
 
-        base_name = "Auto"
-        if req.baseModelId and req.baseModelId != "auto":
-            for m in MODEL_CATALOG:
-                if m["id"] == req.baseModelId:
-                    base_name = m["name"]
-                    break
+        base_name = resolved_name or "Auto"
 
         # Embed A1111/Civitai-compatible generation parameters into the PNG (PNG-info text chunk)
         params_text = (
