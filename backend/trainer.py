@@ -366,6 +366,76 @@ def peft_state_to_kohya(state_dict, lora_alpha: float, prefix: str = "lora_unet"
             kohya[alpha_key] = torch.tensor(float(lora_alpha))
     return kohya
 
+
+# Official SDXL diffusers repo — tokenizer_2 pads with '!' (id 0) and
+# text_encoder_2 matches Playground inference. Do not load the raw OpenCLIP
+# bigG checkpoint; its tokenizer pads with <|endoftext|>, so trained LoRAs
+# would not apply against the SDXL UNet.
+SDXL_DIFFUSERS_REPO = "stabilityai/stable-diffusion-xl-base-1.0"
+
+
+def prompt_hidden_state_index(architecture: str, clip_skip: int) -> int:
+    """Index into CLIP hidden_states for text-encoder 1.
+
+    SDXL's UNet was trained on the penultimate layer; diffusers encode_prompt
+    always uses hidden_states[-2] and ignores clip skip. The UI default is
+    clipSkip=1 (last layer), which would train a LoRA that does not match inference.
+    clip_skip still applies to SD 1.5 (A1111 convention: 1 = last, 2 = penultimate).
+    """
+    if architecture == "sdxl":
+        return -2
+    try:
+        skip = int(clip_skip)
+    except (TypeError, ValueError):
+        skip = 1
+    return -max(1, skip)
+
+
+def _module_has_meta(module) -> bool:
+    if module is None or not hasattr(module, "parameters"):
+        return False
+    try:
+        return any(param.is_meta for param in module.parameters())
+    except Exception:
+        return False
+
+
+def _sdxl_encoders_from_diffusers_repo():
+    from transformers import CLIPTextModel, CLIPTextModelWithProjection, CLIPTokenizer
+    repo = SDXL_DIFFUSERS_REPO
+    print(f"[Trainer] Loading SDXL text encoders from {repo} ...")
+    tokenizer_one = CLIPTokenizer.from_pretrained(repo, subfolder="tokenizer")
+    text_encoder_one = CLIPTextModel.from_pretrained(
+        repo, subfolder="text_encoder", torch_dtype=torch.float32, low_cpu_mem_usage=False,
+    )
+    tokenizer_two = CLIPTokenizer.from_pretrained(repo, subfolder="tokenizer_2")
+    text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
+        repo, subfolder="text_encoder_2", torch_dtype=torch.float32, low_cpu_mem_usage=False,
+    )
+    return tokenizer_one, text_encoder_one, tokenizer_two, text_encoder_two
+
+
+def _load_sdxl_text_encoders(pipe):
+    """Prefer the checkpoint's own encoders (same weights Playground inference uses).
+
+    Fall back to the official SDXL diffusers subfolders when from_single_file left
+    them missing or on the meta device.
+    """
+    tok1 = getattr(pipe, "tokenizer", None)
+    enc1 = getattr(pipe, "text_encoder", None)
+    tok2 = getattr(pipe, "tokenizer_2", None)
+    enc2 = getattr(pipe, "text_encoder_2", None)
+    if (
+        tok1 is not None and enc1 is not None
+        and tok2 is not None and enc2 is not None
+        and not _module_has_meta(enc1)
+        and not _module_has_meta(enc2)
+    ):
+        print("[Trainer] Using SDXL text encoders from the loaded checkpoint.")
+        return tok1, enc1, tok2, enc2
+    return _sdxl_encoders_from_diffusers_repo()
+
+
 class LoRADataset(torch.utils.data.Dataset):
     """Image+caption dataset with Aspect Ratio Bucketing support."""
     
@@ -576,24 +646,15 @@ class LoRATrainer:
             
             print(f"[Trainer] Pipeline loaded from single file.")
             
-            # --- CRITICAL FIX: Load text encoder & tokenizer from known pretrained sources ---
-            # from_single_file often creates text encoder with wrong position_embeddings config,
-            # causing "index out of range" errors. The text encoder is frozen during LoRA training
-            # anyway, so loading canonical pretrained weights is correct and safe.
+            # SD 1.5: from_single_file often builds a text encoder with a wrong
+            # position_embeddings config ("index out of range"). Load the canonical CLIP.
+            # SDXL: use the checkpoint's own encoders (matches Playground). Never load
+            # the raw OpenCLIP bigG repo — its tokenizer pad token does not match SDXL.
             from transformers import CLIPTextModel, CLIPTokenizer
             
             if architecture == "sdxl":
-                from transformers import CLIPTextModelWithProjection
-                print("[Trainer] Loading SDXL text encoders from pretrained...")
-                tokenizer_one = CLIPTokenizer.from_pretrained("openai/clip-vit-large-patch14")
-                text_encoder_one = CLIPTextModel.from_pretrained(
-                    "openai/clip-vit-large-patch14", torch_dtype=torch.float32
-                )
-                tokenizer_two = CLIPTokenizer.from_pretrained(
-                    "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k"
-                )
-                text_encoder_two = CLIPTextModelWithProjection.from_pretrained(
-                    "laion/CLIP-ViT-bigG-14-laion2B-39B-b160k", torch_dtype=torch.float32
+                tokenizer_one, text_encoder_one, tokenizer_two, text_encoder_two = (
+                    _load_sdxl_text_encoders(pipe)
                 )
             else:  # sd15
                 print("[Trainer] Loading SD1.5 text encoder from pretrained (openai/clip-vit-large-patch14)...")
@@ -604,16 +665,30 @@ class LoRATrainer:
                 tokenizer_two = None
                 text_encoder_two = None
             
-            # Verify text encoder works on CPU
-            print(f"[Trainer] Verifying text encoder on CPU...")
-            text_encoder_one.eval()
-            with torch.no_grad():
-                test_tokens = tokenizer_one(
-                    "test", padding="max_length", max_length=77,
-                    truncation=True, return_tensors="pt"
+            def _verify_text_encoder():
+                print("[Trainer] Verifying text encoder on CPU...")
+                text_encoder_one.eval()
+                with torch.no_grad():
+                    test_tokens = tokenizer_one(
+                        "test", padding="max_length", max_length=77,
+                        truncation=True, return_tensors="pt"
+                    )
+                    test_out = text_encoder_one(test_tokens.input_ids, output_hidden_states=True)
+                    print(f"[Trainer] Text encoder OK. Output shape: {test_out.hidden_states[-1].shape}")
+
+            try:
+                _verify_text_encoder()
+            except Exception as verify_err:
+                if architecture != "sdxl":
+                    raise
+                print(
+                    f"[Trainer] Checkpoint text encoder failed verification ({verify_err}); "
+                    f"loading official SDXL encoders from {SDXL_DIFFUSERS_REPO}."
                 )
-                test_out = text_encoder_one(test_tokens.input_ids, output_hidden_states=True)
-                print(f"[Trainer] Text encoder OK. Output shape: {test_out.hidden_states[-1].shape}")
+                tokenizer_one, text_encoder_one, tokenizer_two, text_encoder_two = (
+                    _sdxl_encoders_from_diffusers_repo()
+                )
+                _verify_text_encoder()
             
             # Move text encoders to GPU
             text_encoder_one.to(device, dtype=weight_dtype)
@@ -664,8 +739,8 @@ class LoRATrainer:
             
             # Use output_hidden_states for proper penultimate layer extraction
             outputs_one = text_encoder_one(inputs_one.input_ids, output_hidden_states=True)
-            # clip_skip=1 means last layer, clip_skip=2 means penultimate, etc.
-            prompt_embeds = outputs_one.hidden_states[-clip_skip]
+            # SDXL always uses the penultimate layer (matches diffusers encode_prompt).
+            prompt_embeds = outputs_one.hidden_states[prompt_hidden_state_index(architecture, clip_skip)]
             
             if architecture == "sdxl" and text_encoder_two:
                 inputs_two = tokenizer_two(
