@@ -338,6 +338,25 @@ def get_bucket(w: int, h: int, resolution: int, step: int = 64):
     return target_w, target_h
 
 
+def vae_encode_needs_fp32_upcast(
+    weight_dtype_name: str,
+    force_upcast: bool,
+    architecture: str = "",
+) -> bool:
+    """Return True when VAE encoding must run in float32 to avoid fp16 overflow.
+
+    The stock SDXL VAE overflows in float16 (NaN latents → NaN loss → a ruined LoRA).
+    Diffusers pipelines upcast when ``vae.config.force_upcast`` is set; this trainer
+    extracts the VAE and must do the same. bf16 has fp32's exponent range and is safe.
+    """
+    dtype = str(weight_dtype_name).replace("torch.", "").lower()
+    if dtype not in ("float16", "fp16", "half"):
+        return False
+    if force_upcast:
+        return True
+    return architecture in ("sdxl", "kolors")
+
+
 def peft_state_to_kohya(state_dict, lora_alpha: float, prefix: str = "lora_unet"):
     """Convert PEFT LoRA keys to Kohya / A1111 / ComfyUI safetensors keys.
 
@@ -639,8 +658,15 @@ class LoRATrainer:
         del pipe
         gc.collect()
         
-        # Move VAE to GPU for latent caching, then offload
-        vae.to(device, dtype=weight_dtype)
+        # Move VAE to GPU for latent caching, then offload.
+        # SDXL's default VAE overflows in float16; match the inference pipeline and encode in fp32.
+        vae_force_upcast = bool(getattr(getattr(vae, "config", None), "force_upcast", False))
+        vae_encode_dtype = (
+            torch.float32
+            if vae_encode_needs_fp32_upcast(str(weight_dtype), vae_force_upcast, architecture)
+            else weight_dtype
+        )
+        vae.to(device, dtype=vae_encode_dtype)
         vae.requires_grad_(False)
         
         # --- Phase: Preparing Dataset ---
@@ -707,13 +733,18 @@ class LoRATrainer:
             with torch.no_grad():
                 for i in range(len(dataset)):
                     item = dataset[i]
-                    pixel_values = item["pixel_values"].unsqueeze(0).to(device, dtype=weight_dtype)
+                    pixel_values = item["pixel_values"].unsqueeze(0).to(device, dtype=vae_encode_dtype)
                     caption = item["caption"]
                     
                     latents = vae.encode(pixel_values).latent_dist.sample() * vae.config.scaling_factor
+                    if not torch.isfinite(latents).all():
+                        raise RuntimeError(
+                            f"VAE produced non-finite latents for image {i}. "
+                            "The SDXL VAE overflows in float16; encoding must run in float32."
+                        )
                     embeds, pooled = encode_prompt(caption)
                     
-                    cached_latents.append(latents.cpu())
+                    cached_latents.append(latents.to(dtype=weight_dtype).cpu())
                     cached_text_embeds.append(embeds.cpu())
                     if pooled is not None:
                         cached_pooled_embeds.append(pooled.cpu())
