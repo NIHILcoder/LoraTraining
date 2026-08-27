@@ -41,6 +41,7 @@
         "filter": [
           "main.py",
           "trainer.py",
+          "checkpoint_arch.py",
           "requirements.txt"
         ]
       }

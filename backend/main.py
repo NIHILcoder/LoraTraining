@@ -105,6 +105,8 @@ GENERATED_DIR.mkdir(parents=True, exist_ok=True)
 
 ALLOWED_IMAGE_EXT = {".png", ".jpg", ".jpeg", ".webp"}
 
+from checkpoint_arch import infer_checkpoint_architecture, resolve_base_model_path
+
 def assert_under(root: Path, candidate: Path) -> Path:
     """Resolve candidate and require it to sit under root (blocks path traversal)."""
     root_r = root.resolve()
@@ -547,7 +549,6 @@ async def start_training(req: TrainingStartRequest):
     
     # Find the base model file
     models_dir = get_models_dir()
-    model_path = None
     arch = config.baseModel
     
     if arch == "sd21":
@@ -557,27 +558,16 @@ async def start_training(req: TrainingStartRequest):
         )
     if arch not in TRAINING_ARCHITECTURES:
         raise HTTPException(status_code=400, detail=f"Architecture '{arch}' is currently not supported for training.")
-        
-    for m in MODEL_CATALOG:
-        if m["architecture"] == arch:
-            candidate = models_dir / m["filename"]
-            if candidate.exists():
-                model_path = str(candidate)
-                break
-    
-    # Also check custom models
-    if not model_path and SETTINGS_FILE.exists():
+
+    custom_models = []
+    if SETTINGS_FILE.exists():
         try:
-            settings = json.loads(SETTINGS_FILE.read_text())
-            for cm in settings.get("customModels", []):
-                if cm.get("architecture") == arch:
-                    candidate = models_dir / cm["filename"]
-                    if candidate.exists():
-                        model_path = str(candidate)
-                        break
+            custom_models = json.loads(SETTINGS_FILE.read_text()).get("customModels", [])
         except Exception:
-            pass
-    
+            custom_models = []
+    resolved = resolve_base_model_path(arch, models_dir, MODEL_CATALOG, custom_models)
+    model_path = str(resolved) if resolved else None
+
     if not model_path:
         raise HTTPException(status_code=400, detail=f"No downloaded base model found for architecture '{arch}'. Please download one from Models Hub.")
     
@@ -1508,19 +1498,23 @@ async def import_local_model(req: ImportLocalModelReq):
 
     model_id = f"custom-{uuid.uuid4().hex[:8]}"
     name = req.name or src.stem.replace(".", " ").replace("_", " ").replace("-", " ").title()
-    custom_model = {
+    # Import File has no architecture picker (unlike Add-by-URL). Defaulting to
+    # sd15 silently trained/generated SDXL checkpoints with the SD 1.5 pipeline.
+    detected = infer_checkpoint_architecture(src)
+    architecture = detected or req.architecture or "sd15"
+    custom_model = apply_arch_support({
         "id": model_id,
         "name": name,
         "shortName": name[:12],
         "description": f"Imported from: {src.name}",
-        "architecture": req.architecture or "sd15",
+        "architecture": architecture,
         "fileSize": dest.stat().st_size if dest.exists() else 0,
         "filename": dest.name,
         "downloadUrl": "",
         "isCustom": True,
         "status": "downloaded",
         "localPath": str(dest),
-    }
+    })
 
     existing = {}
     if SETTINGS_FILE.exists():
