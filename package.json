@@ -41,6 +41,7 @@
         "filter": [
           "main.py",
           "trainer.py",
+          "lora_compat.py",
           "requirements.txt"
         ]
       }

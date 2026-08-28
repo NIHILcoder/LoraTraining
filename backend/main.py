@@ -278,6 +278,7 @@ class TrainingStartRequest(PydanticBase):
 
 # Global trainer instance
 from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset, estimate_training_time, ARCH_VRAM_MIN
+from lora_compat import architecture_from_result_file, architecture_mismatch
 trainer_instance = LoRATrainer()
 
 def get_output_dir() -> Path:
@@ -701,6 +702,12 @@ async def generate_image(req: GenerateRequest):
         safetensors = list(lora_dir.glob("*.safetensors")) if lora_dir.exists() else []
         if safetensors:
             lora_path = str(safetensors[0])
+        mismatch = architecture_mismatch(
+            architecture_from_result_file(lora_dir / "training_result.json"),
+            target_arch,
+        )
+        if mismatch:
+            raise HTTPException(status_code=400, detail=mismatch)
 
     # --- Check GPU ---
     gpu_available = torch.cuda.is_available()

@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Play,
   Image as ImageIcon,
@@ -18,6 +18,7 @@ import { useLocation } from 'react-router-dom';
 import { Card } from '../components/ui/Card';
 import { Button } from '../components/ui/Button';
 import { generateImage, fetchModels, fetchAvailableBaseModels } from '../services/api';
+import { pickBaseIdForLora } from '../loraArchMatch';
 import './PlaygroundPage.css';
 
 interface GenHistory {
@@ -82,6 +83,7 @@ export function PlaygroundPage() {
   const [copiedSeed, setCopiedSeed] = useState(false);
   const [batchCount, setBatchCount] = useState(1);
   const [genError, setGenError] = useState<string | null>(null);
+  const pendingTestLoraRef = useRef<any>(null);
 
   // Load available LoRA models
   useEffect(() => {
@@ -92,20 +94,29 @@ export function PlaygroundPage() {
           fetchModels(),
           fetchAvailableBaseModels(),
         ]);
-        setAvailableModels(loraModels.map((m: any) => ({
+        const loras = loraModels.map((m: any) => ({
           id: m.id,
           name: m.name,
           filename: m.filename,
           path: m.path,
           rank: m.rank,
           architecture: m.architecture || '',
-        })));
-        setAvailableBaseModels(baseModels.map((m: any) => ({
+        }));
+        const bases = baseModels.map((m: any) => ({
           id: m.id,
           name: m.name || m.shortName,
           architecture: m.architecture,
-        })));
-        if (baseModels.length > 0) setSelectedBaseModel(baseModels[0].id);
+        }));
+        setAvailableModels(loras);
+        setAvailableBaseModels(bases);
+        const pending = pendingTestLoraRef.current;
+        if (pending?.id) setSelectedModel(pending.id);
+        if (bases.length > 0) {
+          const arch = pending?.architecture || loras.find((l: LoRAOption) => l.id === pending?.id)?.architecture;
+          const picked = pickBaseIdForLora(bases, arch);
+          if (picked) setSelectedBaseModel(picked);
+        }
+        if (pending) pendingTestLoraRef.current = null;
       } catch (err) {
         console.error('Failed to load models:', err);
       } finally {
@@ -115,15 +126,23 @@ export function PlaygroundPage() {
     loadModels();
   }, []);
 
-  // Handle incoming model from Gallery "Test" button
+  // Handle incoming model from Gallery "Test" button.
+  // Must also switch the base checkpoint to the LoRA's architecture — catalog
+  // order puts SD 1.5 first, so a default SDXL LoRA would otherwise generate
+  // on the wrong pipeline (silent garbage / no adapter effect).
   useEffect(() => {
     const state = location.state as any;
-    if (state?.loraModel) {
-      setSelectedModel(state.loraModel.id);
-      // Clear the state to prevent re-selecting on navigation
-      window.history.replaceState({}, document.title);
+    if (!state?.loraModel) return;
+    const loraModel = state.loraModel;
+    pendingTestLoraRef.current = loraModel;
+    setSelectedModel(loraModel.id);
+    if (availableBaseModels.length > 0) {
+      const picked = pickBaseIdForLora(availableBaseModels, loraModel.architecture);
+      if (picked) setSelectedBaseModel(picked);
+      pendingTestLoraRef.current = null;
     }
-  }, [location.state]);
+    window.history.replaceState({}, document.title);
+  }, [location.state, availableBaseModels]);
 
   const handleGenerate = async () => {
     setIsGenerating(true);
@@ -283,7 +302,14 @@ export function PlaygroundPage() {
                   <select
                     className="pg-select"
                     value={selectedModel}
-                    onChange={(e) => setSelectedModel(e.target.value)}
+                    onChange={(e) => {
+                      const id = e.target.value;
+                      setSelectedModel(id);
+                      if (id === 'none') return;
+                      const lora = availableModels.find(m => m.id === id);
+                      const picked = pickBaseIdForLora(availableBaseModels, lora?.architecture);
+                      if (picked) setSelectedBaseModel(picked);
+                    }}
                   >
                     <option value="none">No LoRA (base model only)</option>
                     {availableModels.map(m => (
