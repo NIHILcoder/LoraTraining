@@ -278,6 +278,13 @@ class TrainingStartRequest(PydanticBase):
 
 # Global trainer instance
 from trainer import LoRATrainer, get_gpu_info, get_optimization_profile, prepare_dataset, estimate_training_time, ARCH_VRAM_MIN
+from download_utils import (
+    MIN_MODEL_BYTES,
+    part_is_promotable,
+    promote_part_file,
+    sha256_file,
+    should_reset_part_after_http_error,
+)
 trainer_instance = LoRATrainer()
 
 def get_output_dir() -> Path:
@@ -1586,7 +1593,14 @@ async def download_model(model_id: str):
             pass  # disk_usage failure shouldn't block the download
 
     task = asyncio.create_task(
-        run_download(model_id, model_info["downloadUrl"], model_info["filename"], models_dir, model_info.get("sha256"))
+        run_download(
+            model_id,
+            model_info["downloadUrl"],
+            model_info["filename"],
+            models_dir,
+            model_info.get("sha256"),
+            int(model_info.get("fileSize") or 0),
+        )
     )
     active_downloads[model_id] = task
     return {"status": "started"}
@@ -1669,11 +1683,48 @@ async def get_hf_token():
     masked = (token[:4] + "*" * (len(token) - 4)) if len(token) > 4 else ""
     return {"token": masked, "hasToken": bool(token)}
 
-async def run_download(model_id: str, url: str, filename: str, models_dir: Path, expected_sha: Optional[str] = None):
+async def _part_can_be_promoted(
+    part_path: Path,
+    expected_sha: Optional[str],
+    expected_size: int,
+) -> bool:
+    """True if .part is already the finished checkpoint (hash and/or catalog size)."""
+    if not part_path.is_file():
+        return False
+    part_size = part_path.stat().st_size
+    # Skip hashing a known-incomplete resume; never skip a SHA check just because
+    # catalog fileSize is stale (the digest is the source of truth).
+    if expected_size > 0 and part_size < expected_size:
+        return False
+    actual_sha = None
+    if expected_sha and part_size >= MIN_MODEL_BYTES:
+        actual_sha = await asyncio.to_thread(sha256_file, part_path)
+    return part_is_promotable(
+        part_size,
+        expected_sha=expected_sha,
+        expected_size=expected_size,
+        actual_sha=actual_sha,
+    )
+
+
+async def _broadcast_download_complete(model_id: str, final_path: Path) -> None:
+    await broadcast_to_connections({
+        "type": "download_complete",
+        "data": {"modelId": model_id, "localPath": str(final_path)},
+    })
+
+
+async def run_download(
+    model_id: str,
+    url: str,
+    filename: str,
+    models_dir: Path,
+    expected_sha: Optional[str] = None,
+    expected_size: int = 0,
+):
     """Download a model file with resume support, optional SHA256 verification, and progress broadcasting."""
     import aiohttp
     import aiofiles
-    import shutil
     import hashlib
 
     part_path = models_dir / (filename + ".part")
@@ -1683,6 +1734,15 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path,
     print(f"[Download] URL: {url}")
     
     try:
+        # If a previous attempt wrote every byte but failed to rename (.part left
+        # behind after a Windows lock, crash during the 0.5s sleep, etc.), promote
+        # it instead of sending Range: bytes={filesize}- which HuggingFace 416s.
+        if await _part_can_be_promoted(part_path, expected_sha, expected_size):
+            print(f"[Download] Existing partial is already complete — promoting {part_path.name}")
+            await asyncio.to_thread(promote_part_file, part_path, final_path)
+            await _broadcast_download_complete(model_id, final_path)
+            return
+
         secrets = {}
         if SECRETS_FILE.exists():
             try:
@@ -1714,12 +1774,30 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path,
             async with session.get(url, timeout=aiohttp.ClientTimeout(total=None), allow_redirects=True) as response:
                 print(f"[Download] Response status: {response.status} for {url}")
                 if response.status not in (200, 206):
-                    error_msg = f"HTTP {response.status}: {response.reason}"
-                    print(f"[Download] Error: {error_msg} for URL: {url}")
-                    # Special check for 401/404 on HF which might mean gated
-                    if response.status in [401, 403, 404] and "huggingface.co" in url and not hf_token:
-                        error_msg += " (Token might be required)"
+                    can_promote = await _part_can_be_promoted(part_path, expected_sha, expected_size)
+                    if response.status == 416 and can_promote:
+                        print("[Download] HTTP 416 but .part verifies as complete — promoting")
+                        await asyncio.to_thread(promote_part_file, part_path, final_path)
+                        await _broadcast_download_complete(model_id, final_path)
+                        return
+                    if should_reset_part_after_http_error(response.status, can_promote):
+                        # Range-at-EOF 416 would otherwise retry-loop forever on the same .part.
+                        print("[Download] HTTP 416 with unverified partial — deleting .part so retry starts clean")
+                        try:
+                            if part_path.exists():
+                                part_path.unlink()
+                        except OSError:
+                            pass
+                        error_msg = (
+                            "Download resume failed (HTTP 416). The partial file was reset — please retry."
+                        )
+                    else:
+                        error_msg = f"HTTP {response.status}: {response.reason}"
+                        # Special check for 401/404 on HF which might mean gated
+                        if response.status in [401, 403, 404] and "huggingface.co" in url and not hf_token:
+                            error_msg += " (Token might be required)"
 
+                    print(f"[Download] Error: {error_msg} for URL: {url}")
                     await broadcast_to_connections({
                         "type": "download_error",
                         "data": {"modelId": model_id, "message": error_msg}
@@ -1831,20 +1909,12 @@ async def run_download(model_id: str, url: str, filename: str, models_dir: Path,
 
                     print(f"[Download] Finishing: {filename}...")
                     
-                    # Small delay to let OS release file handles on Windows
-                    await asyncio.sleep(0.5)
-                    
-                    # Use shutil.move for more robust cross-platform moving/renaming
-                    if final_path.exists():
-                        final_path.unlink()
-                    shutil.move(str(part_path), str(final_path))
+                    # Rename with retries — Windows Defender often holds the handle after the last write.
+                    await asyncio.to_thread(promote_part_file, part_path, final_path)
                     
                     print(f"[Download] Success: {final_path}")
                     
-                    await broadcast_to_connections({
-                        "type": "download_complete",
-                        "data": {"modelId": model_id, "localPath": str(final_path)}
-                    })
+                    await _broadcast_download_complete(model_id, final_path)
                     
     except asyncio.CancelledError:
         print(f"[Download] Cancelled: {filename} — keeping partial file for resume")

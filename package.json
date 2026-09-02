@@ -41,6 +41,7 @@
         "filter": [
           "main.py",
           "trainer.py",
+          "download_utils.py",
           "requirements.txt"
         ]
       }
